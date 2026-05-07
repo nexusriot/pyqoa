@@ -10,17 +10,17 @@ from ui.settings_dialog import SettingsDialog
 
 
 class MainWindow(QMainWindow):
-    def __init__(self, settings, db):
+    def __init__(self, settings, db, memory=None):
         super().__init__()
         self.settings = settings
         self.db = db
+        self.memory = memory
         self.setWindowTitle("PyQOA")
         self.resize(1280, 820)
         self.setMinimumSize(800, 600)
         self._setup_ui()
         self._setup_menu()
         self._setup_shortcuts()
-        # Auto-select most recent chat (or create one) after the event loop starts
         QTimer.singleShot(0, self._startup_select)
 
 
@@ -28,15 +28,15 @@ class MainWindow(QMainWindow):
         splitter = QSplitter(Qt.Orientation.Horizontal)
         splitter.setHandleWidth(1)
         splitter.setStyleSheet(
-            "QSplitter::handle{background:#2d3748;}"
-            "QSplitter{background:#212121;}"
+            "QSplitter::handle{background:#1e293b;}"
+            "QSplitter{background:#0f172a;}"
         )
 
         self.chat_list = ChatList(self.db)
         self.chat_list.setMinimumWidth(200)
         self.chat_list.setMaximumWidth(340)
 
-        self.chat_view = ChatView(self.settings, self.db)
+        self.chat_view = ChatView(self.settings, self.db, self.memory)
 
         self.chat_list.chat_selected.connect(self._on_chat_selected)
         self.chat_list.chat_deleted.connect(self._on_chat_deleted)
@@ -49,16 +49,22 @@ class MainWindow(QMainWindow):
 
         self.setCentralWidget(splitter)
 
-        status = QStatusBar()
-        status.setStyleSheet("QStatusBar{background:#0f172a;color:#6b7280;font-size:12px;}")
-        self.setStatusBar(status)
+        self._status_bar = QStatusBar()
+        self._status_bar.setStyleSheet(
+            "QStatusBar{background:#0a0f1e;color:#4b5563;font-size:12px;"
+            "border-top:1px solid #1e293b;}"
+        )
+        self.setStatusBar(self._status_bar)
+        self._status_bar.showMessage(f"Model: {self.settings.get('model', '')}")
+
+        self.chat_view.status_updated.connect(self._status_bar.showMessage)
 
     def _setup_menu(self):
         bar = self.menuBar()
         bar.setStyleSheet(
-            "QMenuBar{background:#0f172a;color:#ececf1;}"
+            "QMenuBar{background:#0a0f1e;color:#ececf1;border-bottom:1px solid #1e293b;}"
             "QMenuBar::item:selected{background:#1e3a5f;}"
-            "QMenu{background:#1f2937;color:#ececf1;border:1px solid #374151;}"
+            "QMenu{background:#0f172a;color:#ececf1;border:1px solid #1e293b;}"
             "QMenu::item:selected{background:#2563eb;}"
         )
 
@@ -99,7 +105,9 @@ class MainWindow(QMainWindow):
     def _on_chat_selected(self, chat_id: int):
         self.chat_view.load_chat(chat_id)
 
-    def _on_chat_deleted(self, _chat_id: int):
+    def _on_chat_deleted(self, chat_id: int):
+        if self.memory:
+            self.memory.reset_chat(chat_id)
         chats = self.db.get_chats()
         if chats:
             cid = chats[0]["id"]
@@ -113,7 +121,11 @@ class MainWindow(QMainWindow):
 
     def _open_settings(self):
         dlg = SettingsDialog(self.settings, self)
-        dlg.exec()
+        if dlg.exec():
+            # Refresh model badge if settings changed
+            if self.chat_view.current_chat_id:
+                self.chat_view._model_badge.setText(self.settings.get("model", ""))
+            self._status_bar.showMessage(f"Model: {self.settings.get('model', '')}")
 
     def closeEvent(self, event):
         if self.chat_view.stream_worker and self.chat_view.stream_worker.isRunning():

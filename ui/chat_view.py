@@ -31,15 +31,19 @@ class _InputEdit(QTextEdit):
 class ChatView(QWidget):
     """Right panel: message history + input area."""
 
-    chat_updated = pyqtSignal(int)  # emitted after assistant reply is saved
+    chat_updated = pyqtSignal(int)   # emitted after assistant reply is saved
+    status_updated = pyqtSignal(str) # emitted to update the main window status bar
 
-    def __init__(self, settings, db, parent=None):
+    def __init__(self, settings, db, memory=None, parent=None):
         super().__init__(parent)
         self.settings = settings
         self.db = db
+        self.memory = memory
         self.current_chat_id: int | None = None
         self.stream_worker: StreamWorker | None = None
         self._stream_widget: MessageWidget | None = None
+        self._pending_prompt_tokens = 0
+        self._pending_completion_tokens = 0
         self._setup_ui()
 
 
@@ -53,6 +57,9 @@ class ChatView(QWidget):
         self.welcome.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self.welcome.setStyleSheet("color:#4b5563;font-size:16px;background:#212121;")
         self.welcome.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
+
+        self.chat_header = self._make_chat_header()
+        self.chat_header.hide()
 
         self.scroll_area = QScrollArea()
         self.scroll_area.setWidgetResizable(True)
@@ -73,13 +80,36 @@ class ChatView(QWidget):
         self.input_panel.hide()
 
         lay.addWidget(self.welcome, stretch=1)
+        lay.addWidget(self.chat_header)
         lay.addWidget(self.scroll_area, stretch=1)
         lay.addWidget(self.input_panel)
+
+    def _make_chat_header(self) -> QWidget:
+        bar = QWidget()
+        bar.setFixedHeight(36)
+        bar.setStyleSheet("background:#0f172a;border-bottom:1px solid #1e293b;")
+        lay = QHBoxLayout(bar)
+        lay.setContentsMargins(16, 0, 16, 0)
+        lay.setSpacing(12)
+
+        self._model_badge = QLabel()
+        self._model_badge.setStyleSheet(
+            "color:#94a3b8;font-size:12px;background:#1e293b;"
+            "border-radius:4px;padding:2px 8px;"
+        )
+        lay.addWidget(self._model_badge)
+        lay.addStretch()
+
+        self._token_total_label = QLabel()
+        self._token_total_label.setStyleSheet("color:#4b5563;font-size:11px;")
+        lay.addWidget(self._token_total_label)
+
+        return bar
 
     def _make_input_panel(self) -> QWidget:
         panel = QWidget()
         panel.setStyleSheet(
-            "background:#1a1b26;border-top:1px solid #2d3748;"
+            "background:#161b2e;border-top:1px solid #1e293b;"
         )
         lay = QHBoxLayout(panel)
         lay.setContentsMargins(16, 12, 16, 12)
@@ -91,8 +121,8 @@ class ChatView(QWidget):
         self.input_edit.setMaximumHeight(140)
         self.input_edit.setStyleSheet("""
             QTextEdit {
-                background:#2d3748; color:#ececf1;
-                border:1px solid #4b5563; border-radius:10px;
+                background:#1e293b; color:#ececf1;
+                border:1px solid #334155; border-radius:10px;
                 padding:10px 14px; font-size:14px;
             }
             QTextEdit:focus { border-color:#3b82f6; }
@@ -109,7 +139,7 @@ class ChatView(QWidget):
             }
             QPushButton:hover  { background:#1d4ed8; }
             QPushButton:pressed{ background:#1e40af; }
-            QPushButton:disabled{ background:#374151; color:#6b7280; }
+            QPushButton:disabled{ background:#1e293b; color:#4b5563; }
         """)
         self.send_btn.clicked.connect(self._send)
 
@@ -118,11 +148,11 @@ class ChatView(QWidget):
         self.stop_btn.hide()
         self.stop_btn.setStyleSheet("""
             QPushButton {
-                background:#7f1d1d; color:#fca5a5;
-                border:none; border-radius:10px;
+                background:#450a0a; color:#fca5a5;
+                border:1px solid #7f1d1d; border-radius:10px;
                 font-size:14px; font-weight:bold;
             }
-            QPushButton:hover { background:#991b1b; }
+            QPushButton:hover { background:#7f1d1d; }
         """)
         self.stop_btn.clicked.connect(self._stop_stream)
 
@@ -139,18 +169,46 @@ class ChatView(QWidget):
             self.stream_worker.wait()
 
         self.current_chat_id = chat_id
+        self._pending_prompt_tokens = 0
+        self._pending_completion_tokens = 0
         self._clear_messages()
+
+        model = self.settings.get("model", "")
+        self._model_badge.setText(model)
 
         rows = self.db.get_messages(chat_id)
         for row in rows:
-            self._add_widget(row["role"], row["content"])
+            w = self._add_widget(row["role"], row["content"], model=model)
+            pt = row["prompt_tokens"] if "prompt_tokens" in row.keys() else 0
+            ct = row["completion_tokens"] if "completion_tokens" in row.keys() else 0
+            if (pt or ct) and row["role"] == "assistant":
+                w.set_token_info(pt, ct)
 
         self.welcome.hide()
+        self.chat_header.show()
         self.scroll_area.show()
         self.input_panel.show()
         self.input_edit.setFocus()
+        self._refresh_token_totals()
         QTimer.singleShot(50, self._scroll_bottom)
 
+
+    def _refresh_token_totals(self):
+        if self.current_chat_id is None:
+            return
+        p, c = self.db.get_chat_token_totals(self.current_chat_id)
+        total = p + c
+        if total:
+            self._token_total_label.setText(
+                f"Chat: {total:,} tokens  ({p:,} prompt + {c:,} completion)"
+            )
+            self.status_updated.emit(
+                f"Model: {self.settings.get('model', '')}  |  "
+                f"Chat: {total:,} tokens  ({p:,} prompt + {c:,} completion)"
+            )
+        else:
+            self._token_total_label.setText("")
+            self.status_updated.emit(f"Model: {self.settings.get('model', '')}")
 
     def _clear_messages(self):
         while self.msg_layout.count():
@@ -159,9 +217,9 @@ class ChatView(QWidget):
                 w.deleteLater()
 
     def _add_widget(
-        self, role: str, content: str = "", streaming: bool = False
+        self, role: str, content: str = "", streaming: bool = False, model: str = ""
     ) -> MessageWidget:
-        w = MessageWidget(role, content, streaming=streaming)
+        w = MessageWidget(role, content, streaming=streaming, model=model)
         self.msg_layout.addWidget(w)
         QTimer.singleShot(80, self._scroll_bottom)
         return w
@@ -183,20 +241,29 @@ class ChatView(QWidget):
         self.send_btn.setEnabled(False)
         self.stop_btn.show()
 
-        # Persist + show user message
         self.db.add_message(self.current_chat_id, "user", text)
         self._add_widget("user", text)
 
-        # Create streaming assistant bubble
-        self._stream_widget = self._add_widget("assistant", streaming=True)
+        model = self.settings.get("model", "")
+        self._stream_widget = self._add_widget("assistant", streaming=True, model=model)
 
-        # Build message list for the API
-        api_msgs = self._build_api_messages()
-
-        self.stream_worker = StreamWorker(self.settings, api_msgs)
+        if self.memory:
+            self.stream_worker = StreamWorker(
+                self.settings,
+                memory=self.memory,
+                chat_id=self.current_chat_id,
+                current_query=text,
+                system_prompt=self.settings.get("system_prompt", ""),
+            )
+        else:
+            self.stream_worker = StreamWorker(
+                self.settings, messages=self._build_api_messages()
+            )
         self.stream_worker.chunk_received.connect(self._on_chunk)
         self.stream_worker.finished.connect(self._on_finished)
         self.stream_worker.error.connect(self._on_error)
+        self.stream_worker.usage_received.connect(self._on_usage_received)
+        self.stream_worker.context_built.connect(self._on_context_built)
         self.stream_worker.start()
 
     def _stop_stream(self):
@@ -217,14 +284,31 @@ class ChatView(QWidget):
             self._stream_widget.append_chunk(text)
             self._scroll_bottom()
 
+    def _on_context_built(self, retrieved: int):
+        if retrieved > 0:
+            self.status_updated.emit(
+                f"Recalled {retrieved} relevant earlier message(s) via vector memory"
+            )
+
+    def _on_usage_received(self, prompt_tokens: int, completion_tokens: int):
+        self._pending_prompt_tokens = prompt_tokens
+        self._pending_completion_tokens = completion_tokens
+        if self._stream_widget:
+            self._stream_widget.set_token_info(prompt_tokens, completion_tokens)
+
     def _on_finished(self, full_text: str):
         if self._stream_widget:
             self._stream_widget.finalize()
 
         if full_text:
-            self.db.add_message(self.current_chat_id, "assistant", full_text)
+            self.db.add_message(
+                self.current_chat_id,
+                "assistant",
+                full_text,
+                self._pending_prompt_tokens,
+                self._pending_completion_tokens,
+            )
 
-        # Auto-title after the first exchange
         rows = self.db.get_messages(self.current_chat_id)
         if len(rows) == 2:
             first = rows[0]["content"]
@@ -244,5 +328,8 @@ class ChatView(QWidget):
         self.send_btn.setEnabled(True)
         self.stop_btn.hide()
         self._stream_widget = None
+        self._pending_prompt_tokens = 0
+        self._pending_completion_tokens = 0
+        self._refresh_token_totals()
         self.chat_updated.emit(self.current_chat_id)
         QTimer.singleShot(80, self._scroll_bottom)

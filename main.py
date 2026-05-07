@@ -13,6 +13,7 @@ from PyQt6.QtCore import Qt
 
 from settings import Settings
 from database import Database
+from memory import ChatMemory
 from ui.main_window import MainWindow
 
 
@@ -51,8 +52,9 @@ def main():
 
     settings = Settings()
     db = Database(settings.db_path)
+    memory = ChatMemory(settings, db)
 
-    window = MainWindow(settings, db)
+    window = MainWindow(settings, db, memory)
     window.show()
 
     try:

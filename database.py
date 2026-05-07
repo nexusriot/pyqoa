@@ -20,15 +20,27 @@ class Database:
             );
 
             CREATE TABLE IF NOT EXISTS messages (
-                id          INTEGER PRIMARY KEY AUTOINCREMENT,
-                chat_id     INTEGER NOT NULL,
-                role        TEXT    NOT NULL,
-                content     TEXT    NOT NULL,
-                created_at  TEXT    NOT NULL DEFAULT (datetime('now')),
+                id                INTEGER PRIMARY KEY AUTOINCREMENT,
+                chat_id           INTEGER NOT NULL,
+                role              TEXT    NOT NULL,
+                content           TEXT    NOT NULL,
+                prompt_tokens     INTEGER NOT NULL DEFAULT 0,
+                completion_tokens INTEGER NOT NULL DEFAULT 0,
+                created_at        TEXT    NOT NULL DEFAULT (datetime('now')),
                 FOREIGN KEY (chat_id) REFERENCES chats(id) ON DELETE CASCADE
             );
         """)
         self._conn.commit()
+        # Migration: add token columns to existing databases
+        for col_def in (
+            "prompt_tokens INTEGER NOT NULL DEFAULT 0",
+            "completion_tokens INTEGER NOT NULL DEFAULT 0",
+        ):
+            try:
+                self._conn.execute(f"ALTER TABLE messages ADD COLUMN {col_def}")
+                self._conn.commit()
+            except sqlite3.OperationalError:
+                pass  # column already exists
 
 
     def create_chat(self, title: str = "New Chat") -> int:
@@ -62,21 +74,46 @@ class Database:
         self._conn.commit()
 
 
-    def add_message(self, chat_id: int, role: str, content: str) -> int:
+    def add_message(
+        self,
+        chat_id: int,
+        role: str,
+        content: str,
+        prompt_tokens: int = 0,
+        completion_tokens: int = 0,
+    ) -> int:
         cur = self._conn.execute(
-            "INSERT INTO messages (chat_id, role, content) VALUES (?, ?, ?)",
-            (chat_id, role, content),
+            "INSERT INTO messages (chat_id, role, content, prompt_tokens, completion_tokens) "
+            "VALUES (?, ?, ?, ?, ?)",
+            (chat_id, role, content, prompt_tokens, completion_tokens),
         )
         self.touch_chat(chat_id)
         self._conn.commit()
         return cur.lastrowid
 
+    def update_message_tokens(
+        self, message_id: int, prompt_tokens: int, completion_tokens: int
+    ):
+        self._conn.execute(
+            "UPDATE messages SET prompt_tokens=?, completion_tokens=? WHERE id=?",
+            (prompt_tokens, completion_tokens, message_id),
+        )
+        self._conn.commit()
+
     def get_messages(self, chat_id: int) -> list:
         return self._conn.execute(
-            "SELECT id, chat_id, role, content, created_at "
+            "SELECT id, chat_id, role, content, prompt_tokens, completion_tokens, created_at "
             "FROM messages WHERE chat_id=? ORDER BY created_at ASC",
             (chat_id,),
         ).fetchall()
+
+    def get_chat_token_totals(self, chat_id: int) -> tuple[int, int]:
+        row = self._conn.execute(
+            "SELECT COALESCE(SUM(prompt_tokens), 0), COALESCE(SUM(completion_tokens), 0) "
+            "FROM messages WHERE chat_id=?",
+            (chat_id,),
+        ).fetchone()
+        return row[0], row[1]
 
     def close(self):
         self._conn.close()

@@ -1,3 +1,6 @@
 PyQt6>=6.4.0
 openai>=1.0.0
 markdown>=3.4.0
+Pygments>=2.15.0
+# Optional — enables vector retrieval for chat memory.
+chromadb>=0.5.0
