@@ -13,10 +13,13 @@ class Database:
     def _init_schema(self):
         self._conn.executescript("""
             CREATE TABLE IF NOT EXISTS chats (
-                id          INTEGER PRIMARY KEY AUTOINCREMENT,
-                title       TEXT    NOT NULL DEFAULT 'New Chat',
-                created_at  TEXT    NOT NULL DEFAULT (datetime('now')),
-                updated_at  TEXT    NOT NULL DEFAULT (datetime('now'))
+                id            INTEGER PRIMARY KEY AUTOINCREMENT,
+                title         TEXT    NOT NULL DEFAULT 'New Chat',
+                created_at    TEXT    NOT NULL DEFAULT (datetime('now')),
+                updated_at    TEXT    NOT NULL DEFAULT (datetime('now')),
+                model         TEXT,
+                system_prompt TEXT,
+                temperature   REAL
             );
 
             CREATE TABLE IF NOT EXISTS messages (
@@ -31,13 +34,16 @@ class Database:
             );
         """)
         self._conn.commit()
-        # Migration: add token columns to existing databases
-        for col_def in (
-            "prompt_tokens INTEGER NOT NULL DEFAULT 0",
-            "completion_tokens INTEGER NOT NULL DEFAULT 0",
+        # Migrations: add columns to databases created by older versions.
+        for table, col_def in (
+            ("messages", "prompt_tokens INTEGER NOT NULL DEFAULT 0"),
+            ("messages", "completion_tokens INTEGER NOT NULL DEFAULT 0"),
+            ("chats",    "model TEXT"),
+            ("chats",    "system_prompt TEXT"),
+            ("chats",    "temperature REAL"),
         ):
             try:
-                self._conn.execute(f"ALTER TABLE messages ADD COLUMN {col_def}")
+                self._conn.execute(f"ALTER TABLE {table} ADD COLUMN {col_def}")
                 self._conn.commit()
             except sqlite3.OperationalError:
                 pass  # column already exists
@@ -53,8 +59,30 @@ class Database:
     def get_chats(self) -> list:
         return self._conn.execute(
             "SELECT id, title, created_at, updated_at "
-            "FROM chats ORDER BY updated_at DESC"
+            "FROM chats ORDER BY updated_at DESC, id DESC"
         ).fetchall()
+
+    def get_chat(self, chat_id: int):
+        """Return a single chat row (including per-chat overrides), or None."""
+        return self._conn.execute(
+            "SELECT id, title, created_at, updated_at, model, system_prompt, temperature "
+            "FROM chats WHERE id=?",
+            (chat_id,),
+        ).fetchone()
+
+    def update_chat_overrides(
+        self,
+        chat_id: int,
+        model: str | None,
+        system_prompt: str | None,
+        temperature: float | None,
+    ):
+        """Set per-chat overrides. Pass None to inherit the global setting."""
+        self._conn.execute(
+            "UPDATE chats SET model=?, system_prompt=?, temperature=? WHERE id=?",
+            (model, system_prompt, temperature, chat_id),
+        )
+        self._conn.commit()
 
     def update_chat_title(self, chat_id: int, title: str):
         self._conn.execute(
@@ -100,10 +128,23 @@ class Database:
         )
         self._conn.commit()
 
+    def delete_messages_from(self, chat_id: int, message_id: int):
+        """Delete the given message and every message after it in the chat.
+
+        Ordering is by `id` (insertion order), so `id >= message_id` is exactly
+        "this message and everything that came after". Used by edit/regenerate.
+        """
+        self._conn.execute(
+            "DELETE FROM messages WHERE chat_id=? AND id>=?",
+            (chat_id, message_id),
+        )
+        self.touch_chat(chat_id)
+        self._conn.commit()
+
     def get_messages(self, chat_id: int) -> list:
         return self._conn.execute(
             "SELECT id, chat_id, role, content, prompt_tokens, completion_tokens, created_at "
-            "FROM messages WHERE chat_id=? ORDER BY created_at ASC",
+            "FROM messages WHERE chat_id=? ORDER BY id ASC",
             (chat_id,),
         ).fetchall()
 

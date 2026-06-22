@@ -1,4 +1,6 @@
 import json
+import os
+import sys
 import urllib.request
 import urllib.error
 
@@ -9,6 +11,10 @@ from PyQt6.QtWidgets import (
     QCheckBox, QComboBox,
 )
 from PyQt6.QtCore import Qt, QThread, QTimer, pyqtSignal
+
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+import theme
+from memory import chroma_available
 
 
 _PROVIDERS = {
@@ -60,39 +66,132 @@ class _ModelFetcher(QThread):
         return sorted(m["id"] for m in data.get("data", []))
 
 
-_STYLE = """
-QDialog      { background:#0f172a; color:#ececf1; }
-QGroupBox    { color:#64748b; border:1px solid #1e293b; border-radius:8px;
-               margin-top:12px; padding-top:12px; }
-QGroupBox::title { subcontrol-origin:margin; left:12px; padding:0 6px;
-                   color:#94a3b8; font-size:12px; }
-QLabel       { color:#cbd5e1; }
-QLineEdit, QTextEdit, QSpinBox, QDoubleSpinBox, QComboBox {
-    background:#1e293b; color:#ececf1;
-    border:1px solid #334155; border-radius:6px; padding:6px 10px;
-}
+def _style() -> str:
+    """Dialog stylesheet, built per-open so it tracks the active theme."""
+    return f"""
+QDialog      {{ background:{theme.PANEL}; color:{theme.TEXT}; }}
+QGroupBox    {{ color:{theme.FAINT}; border:1px solid {theme.BORDER}; border-radius:{theme.RADIUS_SM}px;
+               margin-top:12px; padding-top:12px; }}
+QGroupBox::title {{ subcontrol-origin:margin; left:12px; padding:0 6px;
+                   color:{theme.MUTED}; font-size:12px; }}
+QLabel       {{ color:{theme.MUTED}; }}
+QLineEdit, QTextEdit, QSpinBox, QDoubleSpinBox, QComboBox {{
+    background:{theme.SURFACE}; color:{theme.TEXT};
+    border:1px solid {theme.BORDER}; border-radius:6px; padding:6px 10px;
+}}
 QLineEdit:focus, QTextEdit:focus, QSpinBox:focus,
-QDoubleSpinBox:focus, QComboBox:focus { border-color:#3b82f6; }
-QComboBox::drop-down { border:none; width:22px; }
-QComboBox QAbstractItemView {
-    background:#1e293b; color:#ececf1;
-    selection-background-color:#2563eb;
-    border:1px solid #334155;
+QDoubleSpinBox:focus, QComboBox:focus {{ border:1px solid {theme.ACCENT}; }}
+QComboBox::drop-down {{ border:none; width:22px; }}
+QComboBox QAbstractItemView {{
+    background:{theme.SURFACE}; color:{theme.TEXT};
+    selection-background-color:{theme.ACCENT};
+    border:1px solid {theme.BORDER};
     outline:none;
-}
-QCheckBox { color:#cbd5e1; }
-QPushButton {
-    background:#1e293b; color:#ececf1;
-    border:1px solid #334155; border-radius:6px; padding:6px 14px;
-}
-QPushButton:hover  { background:#334155; }
-QPushButton:pressed{ background:#475569; }
-QPushButton:checked{ background:#1e3a5f; color:#60a5fa; border:1px solid #3b82f6; }
-QPushButton:disabled{ background:#0f172a; color:#334155; border-color:#1e293b; }
-QScrollBar:vertical { background:#0f172a; width:8px; border:none; }
-QScrollBar::handle:vertical { background:#334155; border-radius:4px; min-height:20px; }
-QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical { height:0; }
+}}
+QCheckBox {{ color:{theme.MUTED}; }}
+QPushButton {{
+    background:{theme.SURFACE}; color:{theme.TEXT};
+    border:1px solid {theme.BORDER}; border-radius:6px; padding:6px 14px;
+}}
+QPushButton:hover  {{ background:{theme.SURFACE_HI}; }}
+QPushButton:pressed{{ background:{theme.BORDER_HI}; }}
+QPushButton:checked{{ background:{theme.SURFACE_SEL}; color:{theme.ACCENT}; border:1px solid {theme.ACCENT}; }}
+QPushButton:disabled{{ background:{theme.PANEL}; color:{theme.BORDER_HI}; border-color:{theme.BORDER}; }}
 """
+
+
+class ChatOptionsDialog(QDialog):
+    """Per-chat overrides for model / system prompt / temperature.
+
+    A blank model or system prompt means "inherit the global setting"; the
+    temperature is only overridden when its checkbox is ticked.
+    """
+
+    def __init__(self, settings, overrides: dict, parent=None):
+        super().__init__(parent)
+        self.settings = settings
+        self._overrides = overrides or {}
+        self.setWindowTitle("Chat Options")
+        self.setMinimumWidth(520)
+        self.setStyleSheet(_style())
+        self._build_ui()
+
+    def _build_ui(self):
+        root = QVBoxLayout(self)
+        root.setSpacing(12)
+        root.setContentsMargins(20, 16, 20, 16)
+
+        intro = QLabel(
+            "Overrides apply to this chat only. Leave a field blank to use the "
+            "global default from Settings."
+        )
+        intro.setWordWrap(True)
+        intro.setStyleSheet("color:#94a3b8;font-size:12px;")
+        root.addWidget(intro)
+
+        box = QGroupBox("Overrides")
+        form = QFormLayout(box)
+        form.setLabelAlignment(Qt.AlignmentFlag.AlignRight)
+        form.setSpacing(10)
+
+        self.model_edit = QLineEdit(self._overrides.get("model", "") or "")
+        self.model_edit.setPlaceholderText(
+            f"Default: {self.settings.get('model', '')}"
+        )
+        form.addRow("Model:", self.model_edit)
+
+        self.temp_check = QCheckBox("Override temperature")
+        has_temp = self._overrides.get("temperature") is not None
+        self.temp_check.setChecked(has_temp)
+        self.temp_spin = QDoubleSpinBox()
+        self.temp_spin.setRange(0.0, 2.0)
+        self.temp_spin.setSingleStep(0.05)
+        self.temp_spin.setDecimals(2)
+        self.temp_spin.setValue(
+            float(self._overrides["temperature"]) if has_temp
+            else float(self.settings.get("temperature", 0.7))
+        )
+        self.temp_spin.setEnabled(has_temp)
+        self.temp_check.toggled.connect(self.temp_spin.setEnabled)
+        temp_row = QHBoxLayout()
+        temp_row.addWidget(self.temp_check)
+        temp_row.addWidget(self.temp_spin)
+        temp_row.addStretch()
+        form.addRow("Temperature:", temp_row)
+
+        self.system_edit = QTextEdit()
+        self.system_edit.setPlainText(self._overrides.get("system_prompt", "") or "")
+        self.system_edit.setPlaceholderText(
+            "Leave blank to use the global system prompt"
+        )
+        self.system_edit.setFixedHeight(90)
+        form.addRow("System prompt:", self.system_edit)
+
+        root.addWidget(box)
+
+        btns = QDialogButtonBox(
+            QDialogButtonBox.StandardButton.Save
+            | QDialogButtonBox.StandardButton.Cancel
+        )
+        btns.button(QDialogButtonBox.StandardButton.Save).setStyleSheet(
+            f"background:{theme.ACCENT};color:white;font-weight:600;"
+            f"border:none;border-radius:6px;padding:6px 18px;"
+        )
+        btns.accepted.connect(self.accept)
+        btns.rejected.connect(self.reject)
+        root.addWidget(btns)
+
+    def result_overrides(self) -> dict:
+        model = self.model_edit.text().strip()
+        system = self.system_edit.toPlainText().strip()
+        return {
+            "model": model or None,
+            "system_prompt": system or None,
+            "temperature": (
+                round(self.temp_spin.value(), 2) if self.temp_check.isChecked()
+                else None
+            ),
+        }
 
 
 class SettingsDialog(QDialog):
@@ -102,7 +201,7 @@ class SettingsDialog(QDialog):
         self._fetcher: _ModelFetcher | None = None
         self.setWindowTitle("Settings")
         self.setMinimumWidth(580)
-        self.setStyleSheet(_STYLE)
+        self.setStyleSheet(_style())
         self._build_ui()
 
     def _build_ui(self):
@@ -274,12 +373,7 @@ class SettingsDialog(QDialog):
         form.addRow("Embedding model:", self.embed_model_edit)
         form.addRow("Embedding URL:", self.embed_url_edit)
 
-        try:
-            from memory import chroma_available
-            chroma_ok = chroma_available()
-        except Exception:
-            chroma_ok = False
-        if not chroma_ok:
+        if not chroma_available():
             note = QLabel(
                 "chromadb is not installed — vector retrieval is unavailable. "
                 "Install it with: pip install chromadb"
@@ -307,8 +401,8 @@ class SettingsDialog(QDialog):
             | QDialogButtonBox.StandardButton.Cancel
         )
         btns.button(QDialogButtonBox.StandardButton.Save).setStyleSheet(
-            "background:#2563eb;color:white;font-weight:bold;"
-            "border:none;border-radius:6px;padding:6px 18px;"
+            f"background:{theme.ACCENT};color:white;font-weight:600;"
+            f"border:none;border-radius:6px;padding:6px 18px;"
         )
         btns.accepted.connect(self._save)
         btns.rejected.connect(self.reject)

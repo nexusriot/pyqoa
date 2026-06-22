@@ -21,6 +21,8 @@ import threading
 from pathlib import Path
 from typing import Optional
 
+from openai import OpenAI
+
 try:
     import chromadb
     _CHROMA_AVAILABLE = True
@@ -42,8 +44,6 @@ class _Embedder:
         self._timeout = timeout
 
     def embed(self, texts: list[str]) -> list[list[float]]:
-        from openai import OpenAI
-
         client = OpenAI(
             api_key=self._api_key,
             base_url=self._base_url,
@@ -69,7 +69,6 @@ class ChatMemory:
         self._client = None
         self._collections: dict[int, object] = {}
 
-    # ----- config helpers -----
     @property
     def enabled(self) -> bool:
         return bool(self._settings.get("memory_enabled", True))
@@ -107,7 +106,6 @@ class ChatMemory:
             return None
         return _Embedder(base_url, api_key, model)
 
-    # ----- vector store handle -----
     def _get_client(self):
         if not _CHROMA_AVAILABLE:
             return None
@@ -150,7 +148,6 @@ class ChatMemory:
             pass
         self._collections.pop(chat_id, None)
 
-    # ----- indexing -----
     def _existing_ids(self, coll) -> set[str]:
         try:
             return set(coll.get().get("ids", []) or [])
@@ -190,7 +187,6 @@ class ChatMemory:
         except Exception:
             return 0
 
-    # ----- retrieval -----
     def _retrieve(
         self, chat_id: int, query: str, exclude_ids: set[int]
     ) -> list[dict]:
@@ -222,7 +218,6 @@ class ChatMemory:
                 break
         return out
 
-    # ----- public API -----
     def build_context(
         self, chat_id: int, current_query: str = ""
     ) -> tuple[list[dict], int]:
