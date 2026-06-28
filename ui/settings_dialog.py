@@ -1,4 +1,6 @@
 import json
+import os
+import sys
 import urllib.request
 import urllib.error
 
@@ -8,7 +10,11 @@ from PyQt6.QtWidgets import (
     QDialogButtonBox, QLabel, QGroupBox, QPushButton,
     QCheckBox, QComboBox,
 )
-from PyQt6.QtCore import Qt, QThread, pyqtSignal
+from PyQt6.QtCore import Qt, QThread, QTimer, pyqtSignal
+
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+import theme
+from memory import chroma_available
 
 
 _PROVIDERS = {
@@ -60,34 +66,132 @@ class _ModelFetcher(QThread):
         return sorted(m["id"] for m in data.get("data", []))
 
 
-_STYLE = """
-QDialog      { background:#1a1b26; color:#ececf1; }
-QGroupBox    { color:#9ca3af; border:1px solid #374151; border-radius:6px;
-               margin-top:10px; padding-top:10px; }
-QGroupBox::title { subcontrol-origin:margin; left:10px; padding:0 4px; }
-QLabel       { color:#d1d5db; }
-QLineEdit, QTextEdit, QSpinBox, QDoubleSpinBox, QComboBox {
-    background:#2d3748; color:#ececf1;
-    border:1px solid #4b5563; border-radius:6px; padding:6px 10px;
-}
+def _style() -> str:
+    """Dialog stylesheet, built per-open so it tracks the active theme."""
+    return f"""
+QDialog      {{ background:{theme.PANEL}; color:{theme.TEXT}; }}
+QGroupBox    {{ color:{theme.FAINT}; border:1px solid {theme.BORDER}; border-radius:{theme.RADIUS_SM}px;
+               margin-top:12px; padding-top:12px; }}
+QGroupBox::title {{ subcontrol-origin:margin; left:12px; padding:0 6px;
+                   color:{theme.MUTED}; font-size:12px; }}
+QLabel       {{ color:{theme.MUTED}; }}
+QLineEdit, QTextEdit, QSpinBox, QDoubleSpinBox, QComboBox {{
+    background:{theme.SURFACE}; color:{theme.TEXT};
+    border:1px solid {theme.BORDER}; border-radius:6px; padding:6px 10px;
+}}
 QLineEdit:focus, QTextEdit:focus, QSpinBox:focus,
-QDoubleSpinBox:focus, QComboBox:focus { border-color:#3b82f6; }
-QComboBox::drop-down { border:none; width:22px; }
-QComboBox QAbstractItemView {
-    background:#2d3748; color:#ececf1;
-    selection-background-color:#2563eb;
-    border:1px solid #4b5563;
-}
-QCheckBox { color:#d1d5db; }
-QPushButton {
-    background:#374151; color:#ececf1;
-    border:none; border-radius:6px; padding:6px 14px;
-}
-QPushButton:hover  { background:#4b5563; }
-QPushButton:pressed{ background:#6b7280; }
-QPushButton:checked{ background:#1e3a5f; color:#60a5fa; border:1px solid #3b82f6; }
-QPushButton:disabled{ background:#1f2937; color:#4b5563; }
+QDoubleSpinBox:focus, QComboBox:focus {{ border:1px solid {theme.ACCENT}; }}
+QComboBox::drop-down {{ border:none; width:22px; }}
+QComboBox QAbstractItemView {{
+    background:{theme.SURFACE}; color:{theme.TEXT};
+    selection-background-color:{theme.ACCENT};
+    border:1px solid {theme.BORDER};
+    outline:none;
+}}
+QCheckBox {{ color:{theme.MUTED}; }}
+QPushButton {{
+    background:{theme.SURFACE}; color:{theme.TEXT};
+    border:1px solid {theme.BORDER}; border-radius:6px; padding:6px 14px;
+}}
+QPushButton:hover  {{ background:{theme.SURFACE_HI}; }}
+QPushButton:pressed{{ background:{theme.BORDER_HI}; }}
+QPushButton:checked{{ background:{theme.SURFACE_SEL}; color:{theme.ACCENT}; border:1px solid {theme.ACCENT}; }}
+QPushButton:disabled{{ background:{theme.PANEL}; color:{theme.BORDER_HI}; border-color:{theme.BORDER}; }}
 """
+
+
+class ChatOptionsDialog(QDialog):
+    """Per-chat overrides for model / system prompt / temperature.
+
+    A blank model or system prompt means "inherit the global setting"; the
+    temperature is only overridden when its checkbox is ticked.
+    """
+
+    def __init__(self, settings, overrides: dict, parent=None):
+        super().__init__(parent)
+        self.settings = settings
+        self._overrides = overrides or {}
+        self.setWindowTitle("Chat Options")
+        self.setMinimumWidth(520)
+        self.setStyleSheet(_style())
+        self._build_ui()
+
+    def _build_ui(self):
+        root = QVBoxLayout(self)
+        root.setSpacing(12)
+        root.setContentsMargins(20, 16, 20, 16)
+
+        intro = QLabel(
+            "Overrides apply to this chat only. Leave a field blank to use the "
+            "global default from Settings."
+        )
+        intro.setWordWrap(True)
+        intro.setStyleSheet("color:#94a3b8;font-size:12px;")
+        root.addWidget(intro)
+
+        box = QGroupBox("Overrides")
+        form = QFormLayout(box)
+        form.setLabelAlignment(Qt.AlignmentFlag.AlignRight)
+        form.setSpacing(10)
+
+        self.model_edit = QLineEdit(self._overrides.get("model", "") or "")
+        self.model_edit.setPlaceholderText(
+            f"Default: {self.settings.get('model', '')}"
+        )
+        form.addRow("Model:", self.model_edit)
+
+        self.temp_check = QCheckBox("Override temperature")
+        has_temp = self._overrides.get("temperature") is not None
+        self.temp_check.setChecked(has_temp)
+        self.temp_spin = QDoubleSpinBox()
+        self.temp_spin.setRange(0.0, 2.0)
+        self.temp_spin.setSingleStep(0.05)
+        self.temp_spin.setDecimals(2)
+        self.temp_spin.setValue(
+            float(self._overrides["temperature"]) if has_temp
+            else float(self.settings.get("temperature", 0.7))
+        )
+        self.temp_spin.setEnabled(has_temp)
+        self.temp_check.toggled.connect(self.temp_spin.setEnabled)
+        temp_row = QHBoxLayout()
+        temp_row.addWidget(self.temp_check)
+        temp_row.addWidget(self.temp_spin)
+        temp_row.addStretch()
+        form.addRow("Temperature:", temp_row)
+
+        self.system_edit = QTextEdit()
+        self.system_edit.setPlainText(self._overrides.get("system_prompt", "") or "")
+        self.system_edit.setPlaceholderText(
+            "Leave blank to use the global system prompt"
+        )
+        self.system_edit.setFixedHeight(90)
+        form.addRow("System prompt:", self.system_edit)
+
+        root.addWidget(box)
+
+        btns = QDialogButtonBox(
+            QDialogButtonBox.StandardButton.Save
+            | QDialogButtonBox.StandardButton.Cancel
+        )
+        btns.button(QDialogButtonBox.StandardButton.Save).setStyleSheet(
+            f"background:{theme.ACCENT};color:white;font-weight:600;"
+            f"border:none;border-radius:6px;padding:6px 18px;"
+        )
+        btns.accepted.connect(self.accept)
+        btns.rejected.connect(self.reject)
+        root.addWidget(btns)
+
+    def result_overrides(self) -> dict:
+        model = self.model_edit.text().strip()
+        system = self.system_edit.toPlainText().strip()
+        return {
+            "model": model or None,
+            "system_prompt": system or None,
+            "temperature": (
+                round(self.temp_spin.value(), 2) if self.temp_check.isChecked()
+                else None
+            ),
+        }
 
 
 class SettingsDialog(QDialog):
@@ -96,22 +200,33 @@ class SettingsDialog(QDialog):
         self.settings = settings
         self._fetcher: _ModelFetcher | None = None
         self.setWindowTitle("Settings")
-        self.setMinimumWidth(560)
-        self.setStyleSheet(_STYLE)
+        self.setMinimumWidth(580)
+        self.setStyleSheet(_style())
         self._build_ui()
 
     def _build_ui(self):
         root = QVBoxLayout(self)
-        root.setSpacing(14)
+        root.setSpacing(12)
         root.setContentsMargins(20, 16, 20, 16)
+
+        # Inline validation error banner (hidden by default)
+        self._error_label = QLabel()
+        self._error_label.setStyleSheet(
+            "color:#fca5a5;background:#450a0a;border:1px solid #7f1d1d;"
+            "border-radius:6px;padding:8px 12px;font-size:13px;"
+        )
+        self._error_label.setWordWrap(True)
+        self._error_label.hide()
+        root.addWidget(self._error_label)
 
         root.addWidget(self._api_group())
         root.addWidget(self._param_group())
+        root.addWidget(self._memory_group())
         root.addWidget(self._system_group())
         root.addWidget(self._button_box())
 
     def _api_group(self) -> QGroupBox:
-        box = QGroupBox("API")
+        box = QGroupBox("API Configuration")
         form = QFormLayout(box)
         form.setLabelAlignment(Qt.AlignmentFlag.AlignRight)
         form.setSpacing(10)
@@ -134,12 +249,13 @@ class SettingsDialog(QDialog):
         self.url_edit = QLineEdit(self.settings.get("api_url", ""))
         self.url_edit.setPlaceholderText("https://api.openai.com/v1")
         self.url_edit.textChanged.connect(self._sync_preset_buttons)
+        self.url_edit.textChanged.connect(lambda _: self._error_label.hide())
         form.addRow("Base URL:", self.url_edit)
-
 
         self.key_edit = QLineEdit(self.settings.get("api_key", ""))
         self.key_edit.setEchoMode(QLineEdit.EchoMode.Password)
         self.key_edit.setPlaceholderText("sk-…  (not required for Ollama)")
+        self.key_edit.textChanged.connect(lambda _: self._error_label.hide())
 
         show_btn = QPushButton("Show")
         show_btn.setFixedWidth(56)
@@ -159,6 +275,7 @@ class SettingsDialog(QDialog):
         self.model_combo.setInsertPolicy(QComboBox.InsertPolicy.NoInsert)
         self.model_combo.addItem(self.settings.get("model", "gpt-4o"))
         self.model_combo.setCurrentText(self.settings.get("model", "gpt-4o"))
+        self.model_combo.currentTextChanged.connect(lambda _: self._error_label.hide())
 
         self.fetch_btn = QPushButton("Fetch Models")
         self.fetch_btn.setFixedWidth(110)
@@ -171,10 +288,9 @@ class SettingsDialog(QDialog):
         form.addRow("Model:", model_row)
 
         self._status_label = QLabel("")
-        self._status_label.setStyleSheet("color:#6b7280;font-size:12px;")
+        self._status_label.setStyleSheet("color:#64748b;font-size:12px;")
         form.addRow("", self._status_label)
 
-        # Highlight correct preset button on open
         self._sync_preset_buttons()
 
         return box
@@ -211,6 +327,65 @@ class SettingsDialog(QDialog):
 
         return box
 
+    def _memory_group(self) -> QGroupBox:
+        box = QGroupBox("Chat Memory")
+        form = QFormLayout(box)
+        form.setLabelAlignment(Qt.AlignmentFlag.AlignRight)
+        form.setSpacing(8)
+
+        self.memory_enabled_check = QCheckBox("Enable sliding-window memory")
+        self.memory_enabled_check.setChecked(
+            bool(self.settings.get("memory_enabled", True))
+        )
+
+        self.window_size_spin = QSpinBox()
+        self.window_size_spin.setRange(2, 200)
+        self.window_size_spin.setSuffix(" messages")
+        self.window_size_spin.setValue(int(self.settings.get("memory_window_size", 20)))
+
+        self.vector_check = QCheckBox(
+            "Use vector retrieval for older messages (requires chromadb)"
+        )
+        self.vector_check.setChecked(
+            bool(self.settings.get("memory_use_vector", False))
+        )
+
+        self.top_k_spin = QSpinBox()
+        self.top_k_spin.setRange(1, 20)
+        self.top_k_spin.setValue(int(self.settings.get("memory_top_k", 4)))
+
+        self.embed_model_edit = QLineEdit(
+            self.settings.get("memory_embed_model", "text-embedding-3-small")
+        )
+        self.embed_model_edit.setPlaceholderText(
+            "text-embedding-3-small  (OpenAI)  /  nomic-embed-text  (Ollama)"
+        )
+
+        self.embed_url_edit = QLineEdit(self.settings.get("memory_embed_url", ""))
+        self.embed_url_edit.setPlaceholderText(
+            "Leave blank to reuse the chat Base URL"
+        )
+
+        form.addRow("", self.memory_enabled_check)
+        form.addRow("Window size:", self.window_size_spin)
+        form.addRow("", self.vector_check)
+        form.addRow("Retrieve top-k:", self.top_k_spin)
+        form.addRow("Embedding model:", self.embed_model_edit)
+        form.addRow("Embedding URL:", self.embed_url_edit)
+
+        if not chroma_available():
+            note = QLabel(
+                "chromadb is not installed — vector retrieval is unavailable. "
+                "Install it with: pip install chromadb"
+            )
+            note.setStyleSheet("color:#f59e0b;font-size:11px;")
+            note.setWordWrap(True)
+            form.addRow("", note)
+            self.vector_check.setEnabled(False)
+            self.vector_check.setChecked(False)
+
+        return box
+
     def _system_group(self) -> QGroupBox:
         box = QGroupBox("System Prompt")
         lay = QVBoxLayout(box)
@@ -226,8 +401,8 @@ class SettingsDialog(QDialog):
             | QDialogButtonBox.StandardButton.Cancel
         )
         btns.button(QDialogButtonBox.StandardButton.Save).setStyleSheet(
-            "background:#2563eb;color:white;font-weight:bold;"
-            "border-radius:6px;padding:6px 18px;"
+            f"background:{theme.ACCENT};color:white;font-weight:600;"
+            f"border:none;border-radius:6px;padding:6px 18px;"
         )
         btns.accepted.connect(self._save)
         btns.rejected.connect(self.reject)
@@ -244,6 +419,9 @@ class SettingsDialog(QDialog):
         else:
             self.key_edit.setPlaceholderText("sk-…")
         self._sync_preset_buttons()
+        # Auto-fetch models when switching to Ollama
+        if name == "Ollama":
+            QTimer.singleShot(100, self._fetch_models)
 
     def _sync_preset_buttons(self):
         current_url = self.url_edit.text().strip()
@@ -260,14 +438,14 @@ class SettingsDialog(QDialog):
     def _fetch_models(self):
         if self._fetcher and self._fetcher.isRunning():
             return
+        url = self.url_edit.text().strip()
+        if not url:
+            self._set_status("Enter a Base URL first.", error=True)
+            return
         self.fetch_btn.setEnabled(False)
-        self._status_label.setText("Fetching models…")
+        self._set_status("Fetching models…")
 
-        self._fetcher = _ModelFetcher(
-            self.url_edit.text().strip(),
-            self.key_edit.text().strip(),
-            parent=self,
-        )
+        self._fetcher = _ModelFetcher(url, self.key_edit.text().strip(), parent=self)
         self._fetcher.done.connect(self._on_models_fetched)
         self._fetcher.error.connect(self._on_fetch_error)
         self._fetcher.start()
@@ -276,32 +454,63 @@ class SettingsDialog(QDialog):
         current = self.model_combo.currentText()
         self.model_combo.clear()
         self.model_combo.addItems(models)
-        # Restore previously selected model if still present, else keep typed value
         idx = self.model_combo.findText(current)
         if idx >= 0:
             self.model_combo.setCurrentIndex(idx)
         else:
             self.model_combo.setCurrentText(current)
-        self._status_label.setText(f"{len(models)} model(s) loaded.")
+        self._set_status(f"{len(models)} model(s) loaded.")
         self.fetch_btn.setEnabled(True)
 
     def _on_fetch_error(self, error: str):
-        self._status_label.setText(f"Error: {error}")
+        self._set_status(f"Failed to fetch models: {error}", error=True)
         self.fetch_btn.setEnabled(True)
 
+    def _set_status(self, text: str, error: bool = False):
+        color = "#ef4444" if error else "#64748b"
+        self._status_label.setStyleSheet(f"color:{color};font-size:12px;")
+        self._status_label.setText(text)
 
 
     def _save(self):
+        url = self.url_edit.text().strip()
+        model = self.model_combo.currentText().strip()
+        key = self.key_edit.text().strip()
+
+        errors = []
+        if not url:
+            errors.append("Base URL is required.")
+        elif not (url.startswith("http://") or url.startswith("https://")):
+            errors.append("Base URL must start with http:// or https://")
+        if not model:
+            errors.append("Model name is required.")
+
+        is_local = any(h in url for h in ("localhost", "127.0.0.1", "::1", ":11434"))
+        if url and not is_local and not key:
+            errors.append("API key is required for non-local endpoints.")
+
+        if errors:
+            self._error_label.setText("  ·  ".join(errors))
+            self._error_label.show()
+            return
+
+        self._error_label.hide()
         self.settings.update(
             {
-                "api_url":       self.url_edit.text().strip(),
-                "api_key":       self.key_edit.text().strip(),
-                "model":         self.model_combo.currentText().strip(),
+                "api_url":       url,
+                "api_key":       key,
+                "model":         model,
                 "timeout":       self.timeout_spin.value(),
                 "max_tokens":    self.max_tokens_spin.value(),
                 "temperature":   self.temp_spin.value(),
                 "stream":        self.stream_check.isChecked(),
                 "system_prompt": self.system_edit.toPlainText().strip(),
+                "memory_enabled":     self.memory_enabled_check.isChecked(),
+                "memory_window_size": self.window_size_spin.value(),
+                "memory_use_vector":  self.vector_check.isChecked(),
+                "memory_top_k":       self.top_k_spin.value(),
+                "memory_embed_model": self.embed_model_edit.text().strip(),
+                "memory_embed_url":   self.embed_url_edit.text().strip(),
             }
         )
         self.settings.save()

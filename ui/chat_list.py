@@ -1,12 +1,18 @@
+import os
+import sys
 from datetime import datetime, timezone
 
 from PyQt6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QLabel, QPushButton,
     QListWidget, QListWidgetItem, QMenu, QInputDialog, QMessageBox,
-    QLineEdit,
+    QLineEdit, QFileDialog,
 )
 from PyQt6.QtCore import Qt, pyqtSignal
 from PyQt6.QtGui import QIcon
+
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+import chat_io
+import theme
 
 
 class _ChatItemWidget(QWidget):
@@ -23,13 +29,13 @@ class _ChatItemWidget(QWidget):
 
         self.title_label = QLabel(title)
         self.title_label.setStyleSheet(
-            "color:#ececf1;font-size:13px;background:transparent;"
+            f"color:{theme.TEXT};font-size:13px;font-weight:500;background:transparent;"
         )
         self.title_label.setWordWrap(False)
 
         date_label = QLabel(self._fmt(updated_at))
         date_label.setStyleSheet(
-            "color:#6b7280;font-size:11px;background:transparent;"
+            f"color:{theme.FAINT};font-size:11px;background:transparent;"
         )
 
         lay.addWidget(self.title_label)
@@ -38,8 +44,10 @@ class _ChatItemWidget(QWidget):
     @staticmethod
     def _fmt(dt_str: str) -> str:
         try:
-            dt = datetime.fromisoformat(dt_str)
-            return dt.strftime("%b %d, %Y  %H:%M")
+            # SQLite's datetime('now') is UTC and naive — tag it as UTC and
+            # convert to local time so the displayed timestamp is correct.
+            dt = datetime.fromisoformat(dt_str).replace(tzinfo=timezone.utc)
+            return dt.astimezone().strftime("%b %d, %Y  %H:%M")
         except Exception:
             return dt_str
 
@@ -61,67 +69,79 @@ class ChatList(QWidget):
         self._setup_ui()
 
     def _setup_ui(self):
-        self.setStyleSheet("background:#111827;")
+        self.setStyleSheet(f"background:{theme.PANEL};")
         lay = QVBoxLayout(self)
         lay.setContentsMargins(0, 0, 0, 0)
         lay.setSpacing(0)
 
         header = QWidget()
-        header.setStyleSheet("background:#0f172a;")
+        header.setStyleSheet(f"background:{theme.PANEL};")
         hlay = QHBoxLayout(header)
-        hlay.setContentsMargins(14, 12, 10, 12)
+        hlay.setContentsMargins(16, 14, 14, 6)
 
-        logo = QLabel("PyQOA")
-        logo.setStyleSheet("color:#ececf1;font-size:16px;font-weight:bold;background:transparent;")
-
-        new_btn = QPushButton("+")
-        new_btn.setFixedSize(30, 30)
-        new_btn.setToolTip("New chat  (Ctrl+N)")
-        new_btn.setStyleSheet("""
-            QPushButton {
-                background:#1e3a5f; color:#60a5fa;
-                border-radius:15px; font-size:20px; font-weight:bold;
-            }
-            QPushButton:hover { background:#2563eb; color:white; }
-        """)
-        new_btn.clicked.connect(self.new_chat_requested)
-
+        logo = QLabel("✦  PyQOA")
+        logo.setStyleSheet(
+            f"color:{theme.TEXT};font-size:16px;font-weight:700;background:transparent;"
+        )
         hlay.addWidget(logo)
         hlay.addStretch()
-        hlay.addWidget(new_btn)
+
+        # Prominent full-width "New chat" button (modern sidebar pattern).
+        new_btn = QPushButton("＋  New chat")
+        new_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        new_btn.setToolTip("New chat  (Ctrl+N)")
+        new_btn.setFixedHeight(38)
+        new_btn.setStyleSheet(f"""
+            QPushButton {{
+                background:{theme.SURFACE}; color:{theme.TEXT};
+                border:1px solid {theme.BORDER}; border-radius:{theme.RADIUS_SM}px;
+                font-size:13px; font-weight:600; text-align:center;
+            }}
+            QPushButton:hover {{ background:{theme.SURFACE_HI}; border-color:{theme.BORDER_HI}; }}
+            QPushButton:pressed {{ background:{theme.SURFACE_SEL}; }}
+        """)
+        new_btn.clicked.connect(self.new_chat_requested)
+        btn_wrap = QWidget()
+        bwl = QVBoxLayout(btn_wrap)
+        bwl.setContentsMargins(14, 4, 14, 6)
+        bwl.addWidget(new_btn)
 
         self.search_edit = QLineEdit()
         self.search_edit.setPlaceholderText("Search chats…")
-        self.search_edit.setStyleSheet("""
-            QLineEdit {
-                background:#1f2937; color:#ececf1;
-                border:none; border-radius:6px;
-                padding:6px 10px; font-size:13px; margin:8px 10px;
-            }
+        self.search_edit.setClearButtonEnabled(True)
+        self.search_edit.setStyleSheet(f"""
+            QLineEdit {{
+                background:{theme.SURFACE}; color:{theme.TEXT};
+                border:1px solid {theme.BORDER}; border-radius:{theme.RADIUS_SM}px;
+                padding:7px 11px; font-size:13px; margin:2px 14px 8px 14px;
+            }}
+            QLineEdit:focus {{ border:1px solid {theme.ACCENT}; }}
         """)
         self.search_edit.textChanged.connect(self._filter)
 
         self.list_widget = QListWidget()
-        self.list_widget.setStyleSheet("""
-            QListWidget {
-                background:#111827; border:none; outline:none;
-            }
-            QListWidget::item {
-                border-radius:6px; margin:1px 6px;
-            }
-            QListWidget::item:selected {
-                background:#1e3a5f;
-            }
-            QListWidget::item:hover:!selected {
-                background:#1f2937;
-            }
+        self.list_widget.setStyleSheet(f"""
+            QListWidget {{
+                background:{theme.PANEL}; border:none; outline:none;
+            }}
+            QListWidget::item {{
+                border-radius:{theme.RADIUS_SM}px; margin:1px 8px;
+            }}
+            QListWidget::item:selected {{
+                background:{theme.SURFACE_SEL};
+            }}
+            QListWidget::item:hover:!selected {{
+                background:{theme.SURFACE_HI};
+            }}
         """)
-        self.list_widget.setSpacing(1)
+        self.list_widget.setSpacing(2)
+        self.list_widget.setFrameShape(self.list_widget.Shape.NoFrame)
         self.list_widget.currentItemChanged.connect(self._on_current_changed)
         self.list_widget.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
         self.list_widget.customContextMenuRequested.connect(self._context_menu)
 
         lay.addWidget(header)
+        lay.addWidget(btn_wrap)
         lay.addWidget(self.search_edit)
         lay.addWidget(self.list_widget, stretch=1)
 
@@ -179,14 +199,43 @@ class ChatList(QWidget):
 
         menu = QMenu(self)
         rename_act = menu.addAction("Rename")
+        export_md_act = menu.addAction("Export as Markdown…")
+        export_json_act = menu.addAction("Export as JSON…")
         menu.addSeparator()
         delete_act = menu.addAction("Delete")
 
         action = menu.exec(self.list_widget.mapToGlobal(pos))
         if action == rename_act:
             self._rename(item, chat_id)
+        elif action == export_md_act:
+            self._export(item, chat_id, "md")
+        elif action == export_json_act:
+            self._export(item, chat_id, "json")
         elif action == delete_act:
             self._delete(chat_id)
+
+    def _export(self, item, chat_id: int, fmt: str):
+        w: _ChatItemWidget = self.list_widget.itemWidget(item)
+        title = w.title_label.text() if w else "chat"
+        safe = "".join(c if c.isalnum() or c in " -_" else "_" for c in title).strip()
+        safe = safe or "chat"
+        if fmt == "md":
+            caption, filt, suffix, fn = (
+                "Export as Markdown", "Markdown (*.md)", ".md", chat_io.export_markdown
+            )
+        else:
+            caption, filt, suffix, fn = (
+                "Export as JSON", "JSON (*.json)", ".json", chat_io.export_json
+            )
+        path, _ = QFileDialog.getSaveFileName(self, caption, f"{safe}{suffix}", filt)
+        if not path:
+            return
+        if not path.lower().endswith(suffix):
+            path += suffix
+        try:
+            fn(self.db, chat_id, path)
+        except Exception as exc:
+            QMessageBox.critical(self, "Export failed", str(exc))
 
     def _rename(self, item, chat_id: int):
         w: _ChatItemWidget = self.list_widget.itemWidget(item)

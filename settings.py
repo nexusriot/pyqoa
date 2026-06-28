@@ -12,6 +12,19 @@ DEFAULTS: dict = {
     "temperature": 0.7,
     "system_prompt": "You are a helpful assistant.",
     "stream": True,
+    "theme": "dark",  # "system", "dark", or "light"
+
+    "memory_enabled": True,
+    "memory_window_size": 20,
+    "memory_use_vector": False,
+    "memory_top_k": 4,
+    "memory_embed_model": "text-embedding-3-small",
+    "memory_embed_url": "",  # blank = use api_url
+    "memory_embed_key": "",  # blank = use api_key
+
+    # UI state (base64-encoded Qt save blobs; blank = use defaults)
+    "window_geometry": "",
+    "splitter_state": "",
 }
 
 
