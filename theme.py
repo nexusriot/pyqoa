@@ -118,6 +118,35 @@ RADIUS      = 12
 RADIUS_SM   = 8
 RADIUS_LG   = 16
 
+# Font sizes. The FS_* tokens below are *derived* from these base sizes and the
+# user's font scale; set_font_scale() rebinds them, exactly like apply() rebinds
+# the colour tokens, so a scale change is another "rebind + rebuild".
+_FONT_BASE = {
+    "FS_XS":     11,   # timestamps, token footers
+    "FS_SM":     12,   # badges, status bar, hints
+    "FS_MD":     13,   # list titles, buttons, inputs
+    "FS_BASE":   14,   # message body
+    "FS_ACTION": 15,   # composer glyphs
+    "FS_LG":     16,   # sidebar logo
+    "FS_TITLE":  22,   # welcome heading, send arrow
+    "FS_LOGO":   34,   # welcome mark
+}
+
+FS_XS      = _FONT_BASE["FS_XS"]
+FS_SM      = _FONT_BASE["FS_SM"]
+FS_MD      = _FONT_BASE["FS_MD"]
+FS_BASE    = _FONT_BASE["FS_BASE"]
+FS_ACTION  = _FONT_BASE["FS_ACTION"]
+FS_LG      = _FONT_BASE["FS_LG"]
+FS_TITLE   = _FONT_BASE["FS_TITLE"]
+FS_LOGO    = _FONT_BASE["FS_LOGO"]
+
+FONT_SCALE = 1.0
+FONT_SCALE_MIN = 0.8
+FONT_SCALE_MAX = 1.6
+FONT_SCALE_STEP = 0.1
+BASE_POINT_SIZE = 10  # QApplication font size at scale 1.0
+
 FONT_STACK  = "'Segoe UI','Helvetica Neue','Inter',Arial,sans-serif"
 MONO_STACK  = "'Cascadia Code','Fira Code','JetBrains Mono',Consolas,monospace"
 
@@ -163,6 +192,28 @@ def apply(name: str = "dark") -> str:
     globals().update(_PALETTES[name])
     globals()["NAME"] = name
     return name
+
+
+def clamp_font_scale(scale: float) -> float:
+    try:
+        value = float(scale)
+    except (TypeError, ValueError):
+        value = 1.0
+    return round(min(FONT_SCALE_MAX, max(FONT_SCALE_MIN, value)), 2)
+
+
+def set_font_scale(scale: float) -> float:
+    """Rebind the FS_* tokens for a new font scale; returns the clamped scale."""
+    value = clamp_font_scale(scale)
+    globals()["FONT_SCALE"] = value
+    for key, base in _FONT_BASE.items():
+        globals()[key] = max(8, int(round(base * value)))
+    return value
+
+
+def app_point_size() -> int:
+    """Point size for the QApplication base font at the active scale."""
+    return max(7, int(round(BASE_POINT_SIZE * FONT_SCALE)))
 
 
 def qpalette() -> QPalette:

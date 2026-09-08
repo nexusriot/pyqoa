@@ -1,0 +1,12 @@
+[Desktop Entry]
+Type=Application
+Version=1.0
+Name=PyQOA
+GenericName=AI Chat Client
+Comment=Desktop chat client for OpenAI-compatible APIs
+Exec=pyqoa %U
+Icon=pyqoa
+Terminal=false
+Categories=Network;Chat;
+Keywords=AI;LLM;chat;OpenAI;Ollama;assistant;
+StartupWMClass=pyqoa

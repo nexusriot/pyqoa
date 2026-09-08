@@ -3,42 +3,23 @@ import os
 
 from PyQt6.QtWidgets import (
     QFrame, QVBoxLayout, QHBoxLayout, QLabel, QTextBrowser, QPushButton,
-    QSizePolicy, QApplication, QToolTip,
+    QSizePolicy, QApplication, QToolTip, QWidget,
 )
 from PyQt6.QtCore import Qt, QTimer, QUrl, pyqtSignal
-from PyQt6.QtGui import QTextCursor, QCursor, QDesktopServices
+from PyQt6.QtGui import QTextCursor, QCursor, QDesktopServices, QPixmap
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+import pricing
 import theme
+import utils
 from utils import render_markdown
 
-# Approximate prices per 1M tokens (input, output) in USD — may be outdated
-_MODEL_PRICES: dict[str, tuple[float, float]] = {
-    "gpt-4o":          (2.50,  10.00),
-    "gpt-4o-mini":     (0.15,   0.60),
-    "gpt-4-turbo":    (10.00,  30.00),
-    "gpt-4":          (30.00,  60.00),
-    "gpt-3.5-turbo":   (0.50,   1.50),
-    "o1":             (15.00,  60.00),
-    "o1-mini":         (3.00,  12.00),
-    "o3-mini":         (1.10,   4.40),
-    "o3":             (10.00,  40.00),
-}
-
-
-def _estimate_cost(model: str, prompt: int, completion: int) -> float | None:
-    model_lc = model.lower()
-    # Match the most specific (longest) price key contained in the model name,
-    # so e.g. "gpt-4o-mini" is not priced as "gpt-4o" and "o1-mini" not as "o1".
-    best_key: str | None = None
-    for key in _MODEL_PRICES:
-        if key in model_lc and (best_key is None or len(key) > len(best_key)):
-            best_key = key
-    if best_key is None:
-        return None
-    in_p, out_p = _MODEL_PRICES[best_key]
-    return (prompt * in_p + completion * out_p) / 1_000_000
-
+# Live Markdown re-rendering while streaming is throttled, and disabled entirely
+# for very long replies where re-laying out the whole document per tick costs
+# more than it gains.
+LIVE_RENDER_MS = 220
+LIVE_RENDER_MAX_CHARS = 24_000
+THUMB_MAX = 190
 
 def _content_css() -> str:
     """Document CSS for a message body. Built per render so it tracks the theme."""
@@ -46,7 +27,7 @@ def _content_css() -> str:
 body {{
     margin: 0; padding: 0;
     font-family: {theme.FONT_STACK};
-    font-size: 14px;
+    font-size: {theme.FS_BASE}px;
     color: {theme.TEXT};
     line-height: 1.62;
 }}
@@ -60,22 +41,22 @@ pre {{
     word-break: break-word;
     margin: 10px 0;
     font-family: {theme.MONO_STACK};
-    font-size: 13px;
+    font-size: {theme.FS_MD}px;
     color: {theme.CODE_FG};
 }}
 /* Inline code */
 code {{
     font-family: {theme.MONO_STACK};
-    font-size: 13px;
+    font-size: {theme.FS_MD}px;
     background: {theme.SURFACE_HI};
     color: {theme.TEXT};
     padding: 2px 6px;
     border-radius: 4px;
 }}
 p {{ margin: 4px 0; }}
-h1 {{ font-size: 20px; margin: 12px 0 6px; color: {theme.TEXT}; border-bottom: 1px solid {theme.BORDER}; padding-bottom: 4px; }}
-h2 {{ font-size: 17px; margin: 10px 0 5px; color: {theme.TEXT}; }}
-h3 {{ font-size: 15px; margin: 8px 0 4px; color: {theme.TEXT}; }}
+h1 {{ font-size: {theme.FS_TITLE - 2}px; margin: 12px 0 6px; color: {theme.TEXT}; border-bottom: 1px solid {theme.BORDER}; padding-bottom: 4px; }}
+h2 {{ font-size: {theme.FS_LG + 1}px; margin: 10px 0 5px; color: {theme.TEXT}; }}
+h3 {{ font-size: {theme.FS_ACTION}px; margin: 8px 0 4px; color: {theme.TEXT}; }}
 table {{ border-collapse: collapse; width: 100%; margin: 10px 0; }}
 td, th {{ border: 1px solid {theme.BORDER_HI}; padding: 6px 12px; }}
 th {{ background: {theme.SURFACE_HI}; color: {theme.MUTED}; font-weight: 600; }}
@@ -134,6 +115,8 @@ class MessageWidget(QFrame):
 
     edit_requested = pyqtSignal(int)        # emits the user message's DB id
     regenerate_requested = pyqtSignal(int)  # emits the assistant message's DB id
+    branch_requested = pyqtSignal(int)      # fork the chat at this message
+    variant_requested = pyqtSignal(int)     # show this alternate reply instead
 
     # Theme-independent labels/glyphs (colours are resolved per-instance in _setup_ui,
     # so they always reflect the active theme — class-level colour dicts would freeze
@@ -154,6 +137,7 @@ class MessageWidget(QFrame):
         streaming: bool = False,
         model: str = "",
         message_id: int | None = None,
+        live_markdown: bool = True,
         parent=None,
     ):
         super().__init__(parent)
@@ -163,6 +147,10 @@ class MessageWidget(QFrame):
         self._model = model
         self.message_id = message_id
         self._code_blocks: list[str] = []
+        self._live_markdown = bool(live_markdown)
+        self._render_timer = QTimer(self)
+        self._render_timer.setSingleShot(True)
+        self._render_timer.timeout.connect(self._live_render)
         self._setup_ui()
         if not streaming and content:
             self._render(content)
@@ -188,7 +176,7 @@ class MessageWidget(QFrame):
         self._avatar.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self._avatar.setStyleSheet(
             f"background:{color}; color:{theme.AVATAR_FG}; border-radius:15px;"
-            f"font-weight:700; font-size:14px;"
+            f"font-weight:700; font-size:{theme.FS_BASE}px;"
         )
         avatar_col = QVBoxLayout()
         avatar_col.setContentsMargins(0, 0, 0, 0)
@@ -206,9 +194,36 @@ class MessageWidget(QFrame):
 
         role_lbl = QLabel(self._ROLE_LABEL[self.role])
         role_lbl.setStyleSheet(
-            f"color:{color};font-weight:700;font-size:12.5px;background:transparent;"
+            f"color:{color};font-weight:700;font-size:{theme.FS_SM}px;background:transparent;"
         )
         header_row.addWidget(role_lbl)
+
+        # Variant switcher: ‹ 2/3 › over alternate replies to the same prompt.
+        self._variant_ids: list[int] = []
+        self._variant_prev = QPushButton("‹")
+        self._variant_prev.setToolTip("Previous alternative reply")
+        self._variant_prev.clicked.connect(lambda: self._step_variant(-1))
+        self._variant_label = QLabel()
+        self._variant_label.setStyleSheet(
+            f"color:{theme.FAINT};font-size:{theme.FS_XS}px;background:transparent;"
+        )
+        self._variant_next = QPushButton("›")
+        self._variant_next.setToolTip("Next alternative reply")
+        self._variant_next.clicked.connect(lambda: self._step_variant(1))
+        for btn in (self._variant_prev, self._variant_next):
+            btn.setCursor(Qt.CursorShape.PointingHandCursor)
+            btn.setFixedSize(18, 20)
+            btn.setStyleSheet(
+                f"QPushButton{{background:transparent;color:{theme.FAINT};"
+                f"border:none;font-size:{theme.FS_SM}px;}}"
+                f"QPushButton:hover{{color:{theme.TEXT};}}"
+                f"QPushButton:disabled{{color:{theme.BORDER_HI};}}"
+            )
+        for w in (self._variant_prev, self._variant_label, self._variant_next):
+            w.hide()
+            header_row.addSpacing(2)
+            header_row.addWidget(w)
+
         header_row.addStretch()
 
         # Per-message actions (hidden until the message is persisted / finalized).
@@ -226,14 +241,30 @@ class MessageWidget(QFrame):
             self._regen_btn.clicked.connect(self._emit_regenerate)
             header_row.addWidget(self._regen_btn)
 
+        self._branch_btn = self._make_action_btn(
+            "⑂", "Branch: copy the chat up to here into a new one"
+        )
+        self._branch_btn.clicked.connect(self._emit_branch)
+        header_row.addWidget(self._branch_btn)
+
         col.addLayout(header_row)
+
+        # Attachment chips sit above the text, like every other chat client.
+        self._attach_row = QHBoxLayout()
+        self._attach_row.setContentsMargins(0, 2, 0, 2)
+        self._attach_row.setSpacing(6)
+        self._attach_wrap = QWidget()
+        self._attach_wrap.setLayout(self._attach_row)
+        self._attach_wrap.hide()
+        col.addWidget(self._attach_wrap)
 
         self.browser = _AutoTextEdit()
         # Don't set `color` here: a widget-level colour overrides inline HTML colours
         # for un-tokenised text, which breaks dark code blocks under the light theme.
         # The document's body CSS drives the body text colour instead.
         self.browser.setStyleSheet(
-            "QTextBrowser { background:transparent; border:none; font-size:14px; }"
+            f"QTextBrowser {{ background:transparent; border:none; "
+            f"font-size:{theme.FS_BASE}px; }}"
         )
         self.browser.anchorClicked.connect(self._on_anchor_clicked)
         col.addWidget(self.browser)
@@ -241,13 +272,21 @@ class MessageWidget(QFrame):
         if self.role == "assistant":
             self._token_label = QLabel()
             self._token_label.setStyleSheet(
-                f"color:{theme.FAINT};font-size:11px;background:transparent;"
+                f"color:{theme.FAINT};font-size:{theme.FS_XS}px;background:transparent;"
             )
             self._token_label.setAlignment(Qt.AlignmentFlag.AlignRight)
             self._token_label.hide()
             col.addWidget(self._token_label)
+            self._tools_label = QLabel()
+            self._tools_label.setStyleSheet(
+                f"color:{theme.FAINT};font-size:{theme.FS_XS}px;"
+                f"background:transparent;"
+            )
+            self._tools_label.hide()
+            col.addWidget(self._tools_label)
         else:
             self._token_label = None
+            self._tools_label = None
 
         outer.addLayout(col, stretch=1)
 
@@ -258,7 +297,7 @@ class MessageWidget(QFrame):
         btn.setFixedHeight(22)
         btn.setStyleSheet(
             f"QPushButton{{background:transparent;color:{theme.FAINT};border:none;"
-            f"font-size:11px;padding:0 7px;border-radius:6px;}}"
+            f"font-size:{theme.FS_XS}px;padding:0 7px;border-radius:6px;}}"
             f"QPushButton:hover{{color:{theme.TEXT};background:{theme.SURFACE_HI};}}"
         )
         self._actions.append(btn)
@@ -286,6 +325,80 @@ class MessageWidget(QFrame):
         if self.message_id is not None:
             self.regenerate_requested.emit(self.message_id)
 
+    def _emit_branch(self):
+        if self.message_id is not None:
+            self.branch_requested.emit(self.message_id)
+
+    def set_variants(self, ids: list[int], current_id: int):
+        """Show the ‹ n/N › switcher when a reply has alternates."""
+        self._variant_ids = list(ids or [])
+        show = len(self._variant_ids) > 1 and current_id in self._variant_ids
+        for w in (self._variant_prev, self._variant_label, self._variant_next):
+            w.setVisible(show)
+        if not show:
+            return
+        idx = self._variant_ids.index(current_id)
+        self._variant_label.setText(f"{idx + 1}/{len(self._variant_ids)}")
+        self._variant_prev.setEnabled(idx > 0)
+        self._variant_next.setEnabled(idx < len(self._variant_ids) - 1)
+
+    def _step_variant(self, delta: int):
+        if self.message_id is None or self.message_id not in self._variant_ids:
+            return
+        idx = self._variant_ids.index(self.message_id) + delta
+        if 0 <= idx < len(self._variant_ids):
+            self.variant_requested.emit(self._variant_ids[idx])
+
+    def set_tools_used(self, names: list[str]):
+        if self._tools_label is None or not names:
+            return
+        unique = ", ".join(dict.fromkeys(names))
+        self._tools_label.setText(f"🔧 tools used: {unique}")
+        self._tools_label.show()
+
+    def set_attachments(self, rows):
+        """Render attachment chips: image thumbnails, file chips for text."""
+        while self._attach_row.count():
+            item = self._attach_row.takeAt(0)
+            if w := item.widget():
+                w.deleteLater()
+        rows = list(rows or [])
+        if not rows:
+            self._attach_wrap.hide()
+            return
+        for row in rows:
+            self._attach_row.addWidget(self._make_chip(row))
+        self._attach_row.addStretch()
+        self._attach_wrap.show()
+
+    def _make_chip(self, row) -> QWidget:
+        name = row["name"]
+        if row["kind"] == "image" and row["data"]:
+            pix = QPixmap()
+            if pix.loadFromData(bytes(row["data"])):
+                label = QLabel()
+                label.setPixmap(
+                    pix.scaled(
+                        THUMB_MAX, THUMB_MAX,
+                        Qt.AspectRatioMode.KeepAspectRatio,
+                        Qt.TransformationMode.SmoothTransformation,
+                    )
+                )
+                label.setToolTip(name)
+                label.setStyleSheet(
+                    f"border:1px solid {theme.BORDER_HI};"
+                    f"border-radius:{theme.RADIUS_SM}px;padding:2px;"
+                )
+                return label
+        chip = QLabel(f"📄 {name}")
+        chip.setToolTip(name)
+        chip.setStyleSheet(
+            f"color:{theme.MUTED};background:{theme.SURFACE_HI};"
+            f"border:1px solid {theme.BORDER};border-radius:{theme.RADIUS_SM}px;"
+            f"padding:3px 9px;font-size:{theme.FS_XS}px;"
+        )
+        return chip
+
     def _on_anchor_clicked(self, url: QUrl):
         s = url.toString()
         if s.startswith("pyqoacopy:"):
@@ -304,22 +417,46 @@ class MessageWidget(QFrame):
             return
         total = prompt_tokens + completion_tokens
         text = f"{prompt_tokens:,} prompt + {completion_tokens:,} completion = {total:,} tokens"
-        cost = _estimate_cost(self._model, prompt_tokens, completion_tokens)
+        cost = pricing.estimate_cost(self._model, prompt_tokens, completion_tokens)
         if cost is not None:
             text += f"  ·  ${cost:.4f}"
         self._token_label.setText(text)
         self._token_label.show()
 
     def append_chunk(self, text: str):
-        """Fast plain-text append during streaming."""
+        """Append streamed text, live-rendering Markdown if that is enabled."""
         self._raw_text += text
+        if self._live_markdown:
+            if len(self._raw_text) > LIVE_RENDER_MAX_CHARS:
+                # Too long to keep re-laying out: fall back to plain appends and
+                # resync the view once so nothing is lost in the switch.
+                self._live_markdown = False
+                self._render_timer.stop()
+                self.browser.setPlainText(self._raw_text)
+                return
+            if not self._render_timer.isActive():
+                self._render_timer.start(LIVE_RENDER_MS)
+            return
         cursor = self.browser.textCursor()
         cursor.movePosition(QTextCursor.MoveOperation.End)
         cursor.insertText(text)
         self.browser.setTextCursor(cursor)
 
+    def _live_render(self):
+        """Render the settled part as Markdown, leaving the tail as plain text."""
+        if not self._streaming:
+            return
+        head, tail = utils.stable_prefix(self._raw_text)
+        body, self._code_blocks = render_markdown(head) if head else ("", [])
+        if tail:
+            body += (
+                "<p>" + utils.escape_html(tail).replace("\n", "<br>") + "</p>"
+            )
+        self._set_html(body)
+
     def finalize(self):
         """Re-render with full Markdown once streaming is done."""
+        self._render_timer.stop()
         self._streaming = False
         self._render(self._raw_text)
         self._update_actions_visibility()
@@ -329,5 +466,11 @@ class MessageWidget(QFrame):
 
     def _render(self, text: str):
         body, self._code_blocks = render_markdown(text)
-        full = f"<html><head><style>{_content_css()}</style></head><body>{body}</body></html>"
+        self._set_html(body)
+
+    def _set_html(self, body: str):
+        full = (
+            f"<html><head><style>{_content_css()}</style></head>"
+            f"<body>{body}</body></html>"
+        )
         self.browser.setHtml(full)

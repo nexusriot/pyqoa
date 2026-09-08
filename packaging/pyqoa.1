@@ -1,0 +1,79 @@
+.TH PYQOA 1 "2026-09-08" "PyQOA 0.2.0" "User Commands"
+.SH NAME
+pyqoa \- desktop chat client for OpenAI-compatible APIs
+.SH SYNOPSIS
+.B pyqoa
+.RI [ options ]
+.SH DESCRIPTION
+.B PyQOA
+is a PyQt6 desktop client for any OpenAI-compatible endpoint: the OpenAI cloud, a
+local Ollama server, OpenRouter, or a custom gateway. Conversations are stored
+locally in SQLite and can be searched full-text, branched, exported and backed up.
+.PP
+Replies stream with live Markdown rendering and syntax-highlighted code. The client
+supports named provider profiles, tool calling over built-ins and MCP servers, image
+and file attachments, per-chat model overrides, token and cost tracking, and
+light/dark theming.
+.SH OPTIONS
+.TP
+.B \-h, \-\-help
+Show a usage summary and exit.
+.TP
+.B \-\-version
+Print the version and exit.
+.TP
+.BI \-\-data\-dir " PATH"
+Use
+.I PATH
+as the profile directory (settings, database and vector store) instead of the
+default location.
+.TP
+.BI \-\-profile " NAME"
+Activate the named provider profile on startup.
+.TP
+.B \-\-new\-chat
+Start in a fresh chat instead of reopening the most recent one.
+.TP
+.BI \-\-prompt " TEXT"
+Open a new chat and send
+.I TEXT
+immediately.
+.TP
+.B \-\-selftest
+Run a headless check of the bundled feature surface (Qt, Markdown rendering, icon,
+database and full-text search, PDF export, token counting, keyring, vector memory)
+and exit non-zero if a required check failed. Useful for verifying a packaged build.
+.SH FILES
+.TP
+.I ~/.config/pyqoa/settings.json
+Configuration, including provider profiles. API keys are stored here in plain text
+unless the OS keyring option is enabled.
+.TP
+.I ~/.config/pyqoa/chats.db
+SQLite database of chats, messages and attachments.
+.TP
+.I ~/.config/pyqoa/vector_memory/
+Chroma vector store, only when vector memory is enabled.
+.SH ENVIRONMENT
+.TP
+.B QT_QPA_PLATFORM
+Qt platform plugin. Set to
+.B offscreen
+to run without a display, as
+.B \-\-selftest
+does automatically.
+.SH EXAMPLES
+Launch straight into a local Ollama profile:
+.PP
+.RS
+.B pyqoa \-\-profile Ollama
+.RE
+.PP
+Ask a one-off question in a new chat:
+.PP
+.RS
+.B pyqoa \-\-prompt "explain SQLite WAL mode"
+.RE
+.SH SEE ALSO
+Full documentation in
+.IR /usr/share/doc/pyqoa/README.md .

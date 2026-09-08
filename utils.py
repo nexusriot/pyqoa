@@ -1,5 +1,7 @@
 import re
+import sys
 import html as _html
+from pathlib import Path
 
 import theme
 
@@ -18,7 +20,24 @@ except ImportError:
     _MARKDOWN = False
 
 
-def _highlight_code(lang: str, code: str) -> str:
+def asset_path(name: str) -> Path:
+    """Locate a bundled asset, whether running from source or a frozen build.
+
+    PyInstaller unpacks data files into `sys._MEIPASS`; from a source checkout
+    they sit under `packaging/`.
+    """
+    base = getattr(sys, "_MEIPASS", None)
+    if base:
+        return Path(base) / name
+    return Path(__file__).parent / "packaging" / name
+
+
+def escape_html(text: str) -> str:
+    """Escape text for safe inclusion in HTML (re-exported for other modules)."""
+    return _html.escape(text or "")
+
+
+def _highlight_code(lang: str, code: str, style: str | None = None) -> str:
     """Return inline-styled highlighted HTML spans for code, or escaped plain text."""
     if not _PYGMENTS:
         return _html.escape(code)
@@ -26,8 +45,20 @@ def _highlight_code(lang: str, code: str) -> str:
         lexer = _get_lexer(lang, stripall=True) if lang else _TextLexer()
     except Exception:
         lexer = _TextLexer()
-    formatter = _HtmlFormatter(noclasses=True, nowrap=True, style=theme.PYGMENTS_STYLE)
+    formatter = _HtmlFormatter(
+        noclasses=True, nowrap=True, style=style or theme.PYGMENTS_STYLE
+    )
     return _pyg_hl(code, lexer, formatter).rstrip("\n")
+
+
+def _export_code_block_html(lang: str, code: str) -> str:
+    """A theme-independent code block for HTML/PDF export (light background)."""
+    inner = _highlight_code(lang, code, style="default")
+    label = f'<span class="lang">{_html.escape(lang)}</span>' if lang else ""
+    return (
+        f'<div class="codeblock">{label}'
+        f'<pre><code>{inner}</code></pre></div>'
+    )
 
 
 def _code_block_html(lang: str, code: str, copy_index: int | None = None) -> str:
@@ -51,7 +82,7 @@ def _code_block_html(lang: str, code: str, copy_index: int | None = None) -> str
     if bits:
         header = (
             f'<p style="margin:0;padding:5px 14px;'
-            f'background:{theme.CODE_HEADER_BG};color:{theme.CODE_HEADER_FG};font-size:11px;'
+            f'background:{theme.CODE_HEADER_BG};color:{theme.CODE_HEADER_FG};font-size:{theme.FS_XS}px;'
             f'font-family:{theme.FONT_STACK};'
             f'border-bottom:1px solid {theme.CODE_BORDER};">'
             f'{"  ·  ".join(bits)}</p>'
@@ -63,7 +94,7 @@ def _code_block_html(lang: str, code: str, copy_index: int | None = None) -> str
         f'{header}'
         f'<pre style="margin:0;padding:12px 16px;background:transparent;'
         f'font-family:{theme.MONO_STACK};'
-        f'font-size:13px;line-height:1.5;white-space:pre-wrap;'
+        f'font-size:{theme.FS_MD}px;line-height:1.5;white-space:pre-wrap;'
         f'word-break:break-word;color:{theme.CODE_FG};">'
         # Wrap in <font color> so un-tokenised code text gets the code foreground as an
         # explicit character format (Qt's rich-text engine honours this), independent
@@ -74,7 +105,9 @@ def _code_block_html(lang: str, code: str, copy_index: int | None = None) -> str
     )
 
 
-def _post_process_code_blocks(html_text: str, codes: list[str]) -> str:
+def _post_process_code_blocks(
+    html_text: str, codes: list[str], for_export: bool = False
+) -> str:
     """Replace <pre><code class="language-X">…</code></pre> with styled+highlighted blocks.
 
     Each block's raw code is appended to `codes`; its position is used as the
@@ -98,6 +131,8 @@ def _post_process_code_blocks(html_text: str, codes: list[str]) -> str:
             lang = ""
         idx = len(codes)
         codes.append(raw_code)
+        if for_export:
+            return _export_code_block_html(lang, raw_code)
         return _code_block_html(lang, raw_code, copy_index=idx)
 
     return re.sub(
@@ -108,8 +143,14 @@ def _post_process_code_blocks(html_text: str, codes: list[str]) -> str:
     )
 
 
-def render_markdown(text: str) -> tuple[str, list[str]]:
-    """Convert Markdown to display HTML and return (html, code_block_sources)."""
+def render_markdown(
+    text: str, for_export: bool = False
+) -> tuple[str, list[str]]:
+    """Convert Markdown to display HTML and return (html, code_block_sources).
+
+    `for_export` swaps the Qt-specific inline-styled code blocks for plain,
+    theme-independent ones suited to the HTML/PDF exports.
+    """
     codes: list[str] = []
     if not _MARKDOWN:
         return _simple_md(text, codes), codes
@@ -117,12 +158,40 @@ def render_markdown(text: str) -> tuple[str, list[str]]:
         text,
         extensions=["fenced_code", "tables", "nl2br", "sane_lists"],
     )
-    return _post_process_code_blocks(html_out, codes), codes
+    return _post_process_code_blocks(html_out, codes, for_export), codes
 
 
-def text_to_html(text: str) -> str:
+def text_to_html(text: str, for_export: bool = False) -> str:
     """Convert Markdown text to HTML for display in QTextEdit."""
-    return render_markdown(text)[0]
+    return render_markdown(text, for_export)[0]
+
+
+_FENCE_RE = re.compile(r"^\s*```", re.MULTILINE)
+
+
+def in_open_code_fence(text: str) -> bool:
+    """True when `text` ends inside an unterminated ``` fence."""
+    return len(_FENCE_RE.findall(text or "")) % 2 == 1
+
+
+def stable_prefix(text: str) -> tuple[str, str]:
+    """Split streamed text into (complete part, still-arriving tail).
+
+    The complete part ends at the last blank line that is *not* inside an open
+    code fence, so incremental rendering never re-flows a half-written block.
+    """
+    text = text or ""
+    if in_open_code_fence(text):
+        fence_start = text.rfind("```")
+        head = text[:fence_start]
+        idx = head.rfind("\n\n")
+        if idx == -1:
+            return "", text
+        return text[: idx + 2], text[idx + 2 :]
+    idx = text.rfind("\n\n")
+    if idx == -1:
+        return "", text
+    return text[: idx + 2], text[idx + 2 :]
 
 
 def _simple_md(text: str, codes: list[str] | None = None) -> str:
@@ -146,7 +215,7 @@ def _simple_md(text: str, codes: list[str] | None = None) -> str:
                 r"`([^`]+)`",
                 r'<code style="background:#1e2d3d;padding:2px 6px;'
                 r'border-radius:4px;color:#e2e8f0;font-family:Consolas,monospace;'
-                r'font-size:13px;">\1</code>',
+                rf'font-size:{theme.FS_MD}px;">\1</code>',
                 p,
             )
             # bold + italic

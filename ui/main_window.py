@@ -11,9 +11,12 @@ from PyQt6.QtCore import Qt, QTimer, QByteArray
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 import chat_io
 import theme
+from tools import ToolRegistry
+from version import __version__
 from ui.chat_list import ChatList
 from ui.chat_view import ChatView
-from ui.settings_dialog import SettingsDialog
+from ui.settings_dialog import PromptLibraryDialog, SettingsDialog
+from ui.usage_dialog import UsageDialog
 
 
 def _encode_qba(ba: QByteArray) -> str:
@@ -36,6 +39,7 @@ class MainWindow(QMainWindow):
         self.settings = settings
         self.db = db
         self.memory = memory
+        self.registry = ToolRegistry(settings)
         self._theme_pref = settings.get("theme", "dark")  # system/light/dark
         self.setWindowTitle("PyQOA")
         self.resize(1280, 820)
@@ -44,8 +48,8 @@ class MainWindow(QMainWindow):
         self._setup_menu()
         self._watch_system_theme()
         self._restore_geometry()
+        self._update_title()
         QTimer.singleShot(0, self._startup_select)
-
 
     def _setup_ui(self):
         self._build_central()
@@ -59,7 +63,7 @@ class MainWindow(QMainWindow):
         self.chat_view.status_updated.connect(self._status_bar.showMessage)
 
     def _build_central(self):
-        """Create the splitter + chat list + chat view (also used on theme switch)."""
+        """Create the splitter + chat list + chat view (also used on restyle)."""
         splitter = QSplitter(Qt.Orientation.Horizontal)
         splitter.setHandleWidth(1)
         splitter.setStyleSheet(
@@ -67,17 +71,22 @@ class MainWindow(QMainWindow):
             f"QSplitter{{background:{theme.BG};}}"
         )
 
-        self.chat_list = ChatList(self.db)
+        self.chat_list = ChatList(self.db, self.settings)
         self.chat_list.setMinimumWidth(220)
         self.chat_list.setMaximumWidth(360)
 
-        self.chat_view = ChatView(self.settings, self.db, self.memory)
+        self.chat_view = ChatView(
+            self.settings, self.db, self.memory, registry=self.registry
+        )
 
         self.chat_list.chat_selected.connect(self._on_chat_selected)
-        self.chat_list.chat_deleted.connect(self._on_chat_deleted)
+        self.chat_list.chats_deleted.connect(self._on_chats_deleted)
         self.chat_list.new_chat_requested.connect(self._new_chat)
+        self.chat_list.message_selected.connect(self._on_message_selected)
         self.chat_view.new_chat_requested.connect(self._new_chat)
         self.chat_view.chat_updated.connect(self._on_chat_updated)
+        self.chat_view.chat_branched.connect(self._on_chat_branched)
+        self.chat_view.settings_requested.connect(self._open_settings)
 
         splitter.addWidget(self.chat_list)
         splitter.addWidget(self.chat_view)
@@ -103,10 +112,14 @@ class MainWindow(QMainWindow):
 
     def _style_status_bar(self):
         self._status_bar.setStyleSheet(
-            f"QStatusBar{{background:{theme.PANEL};color:{theme.FAINT};font-size:12px;"
+            f"QStatusBar{{background:{theme.PANEL};color:{theme.FAINT};"
+            f"font-size:{theme.FS_SM}px;"
             f"border-top:1px solid {theme.BORDER};}}"
             f"QStatusBar::item{{border:none;}}"
         )
+
+    def _update_title(self):
+        self.setWindowTitle(f"PyQOA {__version__} — {self.settings.active_profile}")
 
     def apply_theme(self, pref: str):
         """Set the theme *preference* (system/light/dark), persist it, and restyle.
@@ -126,13 +139,31 @@ class MainWindow(QMainWindow):
             act.setChecked(True)
 
         theme.apply(theme.resolve(pref))
-        self._relayout_for_theme()
+        self._rebuild_ui()
         label = pref.capitalize()
         if pref == "system":
             label += f" ({theme.NAME})"
         self._status_bar.showMessage(f"Theme: {label}")
 
-    def _relayout_for_theme(self):
+    def change_font_scale(self, delta: float | None):
+        """Grow/shrink every UI font. `None` resets to 100%.
+
+        Font sizes are theme tokens, so this is the same "rebind + rebuild" the
+        theme switch uses.
+        """
+        scale = 1.0 if delta is None else theme.FONT_SCALE + delta
+        applied = theme.set_font_scale(scale)
+        self.settings.set("font_scale", applied)
+        self.settings.save()
+        app = QApplication.instance()
+        if app is not None:
+            font = app.font()
+            font.setPointSize(theme.app_point_size())
+            app.setFont(font)
+        self._rebuild_ui()
+        self._status_bar.showMessage(f"Font size: {int(applied * 100)}%")
+
+    def _rebuild_ui(self):
         """Re-apply palette + global QSS and rebuild the UI so widgets restyle."""
         # Carry the current splitter position over to the rebuilt splitter.
         if hasattr(self, "splitter"):
@@ -155,7 +186,7 @@ class MainWindow(QMainWindow):
         self._style_status_bar()
 
         # refresh(select_id=…) re-selects the row, which loads it via chat_selected.
-        chats = self.db.get_chats()
+        chats = self.db.get_chats(include_archived=True)
         if current is not None and any(c["id"] == current for c in chats):
             self.chat_list.refresh(select_id=current)
         elif chats:
@@ -176,7 +207,7 @@ class MainWindow(QMainWindow):
         resolved = theme.resolve("system")
         if resolved != theme.NAME:
             theme.apply(resolved)
-            self._relayout_for_theme()
+            self._rebuild_ui()
             self._status_bar.showMessage(f"Theme: System ({resolved})")
 
     def _toggle_theme(self):
@@ -194,6 +225,17 @@ class MainWindow(QMainWindow):
 
         a_import = file_menu.addAction("Import Chat (JSON)…")
         a_import.triggered.connect(self._import_chat)
+
+        export_menu = file_menu.addMenu("Export All Chats…")
+        for label, fmt in (
+            ("as Markdown", "md"), ("as JSON", "json"),
+            ("as HTML", "html"), ("as PDF", "pdf"),
+        ):
+            act = export_menu.addAction(label)
+            act.triggered.connect(lambda _=False, f=fmt: self._export_all(f))
+
+        a_backup = file_menu.addAction("Backup Database…")
+        a_backup.triggered.connect(self._backup)
 
         file_menu.addSeparator()
 
@@ -224,6 +266,65 @@ class MainWindow(QMainWindow):
         a_toggle.setShortcut("Ctrl+Shift+L")
         a_toggle.triggered.connect(self._toggle_theme)
 
+        view_menu.addSeparator()
+        a_bigger = view_menu.addAction("Increase Font Size")
+        a_bigger.setShortcut("Ctrl+=")
+        a_bigger.triggered.connect(
+            lambda: self.change_font_scale(theme.FONT_SCALE_STEP)
+        )
+        a_smaller = view_menu.addAction("Decrease Font Size")
+        a_smaller.setShortcut("Ctrl+-")
+        a_smaller.triggered.connect(
+            lambda: self.change_font_scale(-theme.FONT_SCALE_STEP)
+        )
+        a_reset = view_menu.addAction("Reset Font Size")
+        a_reset.setShortcut("Ctrl+0")
+        a_reset.triggered.connect(lambda: self.change_font_scale(None))
+
+        view_menu.addSeparator()
+        a_find = view_menu.addAction("Find in Conversation")
+        a_find.setShortcut("Ctrl+F")
+        a_find.triggered.connect(lambda: self.chat_view.toggle_find())
+
+        tools_menu = bar.addMenu("Tools")
+        self._profile_menu = tools_menu.addMenu("Provider Profile")
+        self._rebuild_profile_menu()
+
+        a_prompts = tools_menu.addAction("Prompt Library…")
+        a_prompts.setShortcut("Ctrl+P")
+        a_prompts.triggered.connect(self._open_prompts)
+
+        a_usage = tools_menu.addAction("Usage…")
+        a_usage.setShortcut("Ctrl+U")
+        a_usage.triggered.connect(self._open_usage)
+
+    def _rebuild_profile_menu(self):
+        """Rebuild the provider-profile radio list from the current settings."""
+        self._profile_menu.clear()
+        self._profile_group = QActionGroup(self)
+        self._profile_group.setExclusive(True)
+        active = self.settings.active_profile
+        for name in self.settings.profile_names():
+            act = QAction(name, self, checkable=True)
+            act.setChecked(name == active)
+            act.triggered.connect(
+                lambda checked, n=name: checked and self._switch_profile(n)
+            )
+            self._profile_group.addAction(act)
+            self._profile_menu.addAction(act)
+
+    def _switch_profile(self, name: str):
+        if not self.settings.activate_profile(name):
+            return
+        self.registry.close()  # tool config may differ per profile
+        self._update_title()
+        self.chat_view._model_badge.setText(
+            self.chat_view._effective("model", "")
+        )
+        self._status_bar.showMessage(
+            f"Profile: {name}  |  Model: {self.settings.get('model', '')}"
+        )
+
     def _startup_select(self):
         chats = self.db.get_chats()
         if chats:
@@ -251,12 +352,58 @@ class MainWindow(QMainWindow):
         self.chat_view.load_chat(chat_id)
         self._status_bar.showMessage("Chat imported.")
 
+    def _export_all(self, fmt: str):
+        directory = QFileDialog.getExistingDirectory(
+            self, "Export all chats into folder"
+        )
+        if not directory:
+            return
+        try:
+            written = chat_io.export_all(self.db, directory, fmt)
+        except Exception as exc:
+            QMessageBox.critical(self, "Export failed", str(exc))
+            return
+        self._status_bar.showMessage(
+            f"Exported {len(written)} chat(s) as {fmt.upper()} to {directory}"
+        )
+
+    def _backup(self):
+        path, _ = QFileDialog.getSaveFileName(
+            self, "Backup", "pyqoa-backup.zip", "Zip archive (*.zip)"
+        )
+        if not path:
+            return
+        if not path.lower().endswith(".zip"):
+            path += ".zip"
+        try:
+            chat_io.backup(self.settings, self.db, path)
+        except Exception as exc:
+            QMessageBox.critical(self, "Backup failed", str(exc))
+            return
+        self._status_bar.showMessage(f"Backup written to {path} (API keys excluded)")
+
+    def _open_prompts(self):
+        dlg = PromptLibraryDialog(self.settings, self)
+        dlg.prompt_chosen.connect(self.chat_view._insert_prompt)
+        dlg.exec()
+
+    def _open_usage(self):
+        UsageDialog(self.db, self).exec()
+
     def _on_chat_selected(self, chat_id: int):
         self.chat_view.load_chat(chat_id)
 
-    def _on_chat_deleted(self, chat_id: int):
+    def _on_message_selected(self, chat_id: int, message_id: int):
+        self.chat_view.load_chat(chat_id, focus_message_id=message_id)
+
+    def _on_chat_branched(self, chat_id: int):
+        self.chat_list.refresh(select_id=chat_id)
+        self.chat_view.load_chat(chat_id)
+
+    def _on_chats_deleted(self, chat_ids: list):
         if self.memory:
-            self.memory.reset_chat(chat_id)
+            for chat_id in chat_ids:
+                self.memory.reset_chat(chat_id)
         chats = self.db.get_chats()
         if chats:
             cid = chats[0]["id"]
@@ -271,9 +418,16 @@ class MainWindow(QMainWindow):
     def _open_settings(self):
         dlg = SettingsDialog(self.settings, self)
         if dlg.exec():
-            # Refresh model badge if settings changed
+            # Tool and provider configuration may have changed — drop any running
+            # MCP servers so the next request picks up the new set.
+            self.registry.close()
+            self._rebuild_profile_menu()
+            self._update_title()
             if self.chat_view.current_chat_id:
-                self.chat_view._model_badge.setText(self.settings.get("model", ""))
+                self.chat_view._model_badge.setText(
+                    self.chat_view._effective("model", "")
+                )
+                self.chat_view._refresh_context_tokens()
             self._status_bar.showMessage(f"Model: {self.settings.get('model', '')}")
 
     def closeEvent(self, event):
@@ -281,4 +435,5 @@ class MainWindow(QMainWindow):
         if self.chat_view.stream_worker and self.chat_view.stream_worker.isRunning():
             self.chat_view.stream_worker.cancel()
             self.chat_view.stream_worker.wait(3000)
+        self.registry.close()
         event.accept()
