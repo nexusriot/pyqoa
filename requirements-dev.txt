@@ -1,0 +1,5 @@
+# Test tooling (the app itself only needs requirements.txt).
+pytest>=8.0
+pytest-qt>=4.4
+pytest-cov>=5.0
+pyflakes>=3.0

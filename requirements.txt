@@ -1,3 +1,9 @@
-PyQt6>=6.4.0
-openai>=1.0.0
-markdown>=3.4.0
+# Everything: the packages PyQOA needs, plus the optional feature dependencies.
+-r requirements-core.txt
+
+# Optional — enables vector retrieval for chat memory.
+chromadb>=0.5.0
+# Optional — exact token counts for the context meter and budget.
+tiktoken>=0.7.0
+# Optional — store API keys in the OS keyring instead of settings.json.
+keyring>=25.0
