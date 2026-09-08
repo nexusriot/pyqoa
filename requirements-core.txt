@@ -1,0 +1,7 @@
+# The packages PyQOA needs to run.
+PyQt6>=6.4.0
+openai>=1.0.0
+# Markdown rendering and syntax highlighting. There is a reduced fallback
+# without them, so the app starts either way, but replies look much better.
+markdown>=3.4.0
+Pygments>=2.15.0

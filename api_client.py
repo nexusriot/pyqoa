@@ -112,6 +112,22 @@ def friendly_error(exc: Exception) -> str:
     return str(exc)
 
 
+def request_headers(settings) -> dict:
+    """The extra HTTP headers to send, with our User-Agent as a default.
+
+    Header names are case-insensitive, so the default is applied that way: a
+    user who configures "user-agent" must override ours rather than be sent
+    alongside it.
+    """
+    headers = settings.get("request_headers") or {}
+    if not isinstance(headers, dict):
+        headers = {}
+    headers = {str(k): str(v) for k, v in headers.items() if str(k).strip()}
+    if not any(name.lower() == "user-agent" for name in headers):
+        headers["User-Agent"] = f"PyQOA/{__version__}"
+    return headers
+
+
 def build_client(settings, overrides: dict | None = None) -> OpenAI:
     """Construct an OpenAI client honouring custom headers and a proxy.
 
@@ -120,11 +136,7 @@ def build_client(settings, overrides: dict | None = None) -> OpenAI:
     """
     overrides = overrides or {}
     timeout = float(overrides.get("timeout") or settings.get("timeout", 60))
-    headers = settings.get("request_headers") or {}
-    if not isinstance(headers, dict):
-        headers = {}
-    headers = {str(k): str(v) for k, v in headers.items() if str(k).strip()}
-    headers.setdefault("User-Agent", f"PyQOA/{__version__}")
+    headers = request_headers(settings)
 
     proxy = (settings.get("proxy") or "").strip()
     http_client = None

@@ -9,6 +9,27 @@ import threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 
+class Headers(dict):
+    """One request's headers, looked up without regard to case.
+
+    HTTP field names are case-insensitive (RFC 9110) and SDK versions disagree
+    on what they send: openai 2.x forwards `X-Title` verbatim, 3.x lowercases it
+    to `x-title`. A test that pins the casing tests the SDK, not PyQOA.
+    """
+
+    def __init__(self, items):
+        super().__init__({str(k).lower(): v for k, v in items})
+
+    def __getitem__(self, key):
+        return super().__getitem__(str(key).lower())
+
+    def __contains__(self, key):
+        return super().__contains__(str(key).lower())
+
+    def get(self, key, default=None):
+        return super().get(str(key).lower(), default)
+
+
 def _chunk(delta: dict, model: str = "test-model") -> str:
     payload = {
         "id": "chatcmpl-test",
@@ -73,7 +94,9 @@ class FakeAPI:
             def do_POST(self):
                 length = int(self.headers.get("Content-Length", 0))
                 body = json.loads(self.rfile.read(length) or b"{}")
-                api.requests.append({"body": body, "headers": dict(self.headers)})
+                api.requests.append(
+                    {"body": body, "headers": Headers(self.headers.items())}
+                )
                 step = api._next()
 
                 if step["type"] == "status":

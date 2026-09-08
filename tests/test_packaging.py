@@ -19,7 +19,7 @@ SCRIPTS = sorted(PACKAGING.glob("*.sh"))
 MAKEFILE = (ROOT / "Makefile").read_text()
 
 EXPECTED_TARGETS = [
-    "help", "version", "venv", "deps", "deps-dev", "deps-build", "run",
+    "help", "version", "venv", "deps", "deps-core", "deps-dev", "deps-build", "run",
     "test", "test-cov", "lint", "selftest", "check", "binary", "onefile",
     "verify-binary", "tarball", "deb", "deb-lint", "sdist", "install",
     "uninstall", "clean", "distclean",
@@ -130,11 +130,14 @@ def test_readme_and_deb_agree_with_the_version():
     assert "from version import __version__" in deb
 
 
-def test_ci_workflow_is_valid_and_uses_the_make_targets():
+def _workflow():
     yaml = pytest.importorskip("yaml")
-    workflow = ROOT / ".github" / "workflows" / "ci.yml"
-    data = yaml.safe_load(workflow.read_text())
-    assert set(data["jobs"]) == {"test", "package"}
+    return yaml.safe_load((ROOT / ".github/workflows/ci.yml").read_text())
+
+
+def test_ci_workflow_is_valid_and_uses_the_make_targets():
+    data = _workflow()
+    assert set(data["jobs"]) == {"test", "test-minimal", "package"}
     commands = " ".join(
         step.get("run", "")
         for job in data["jobs"].values()
@@ -142,6 +145,36 @@ def test_ci_workflow_is_valid_and_uses_the_make_targets():
     )
     for target in ("make check", "make deb", "make verify-binary"):
         assert target in commands
+
+
+def test_ci_packages_only_after_the_tests_pass():
+    assert set(_workflow()["jobs"]["package"]["needs"]) == {"test", "test-minimal"}
+
+
+def test_ci_jobs_are_time_bounded():
+    for name, job in _workflow()["jobs"].items():
+        assert job.get("timeout-minutes"), f"{name} has no timeout"
+
+
+def test_ci_installs_the_requirements_files_that_exist():
+    data = _workflow()
+    commands = " ".join(
+        step.get("run", "")
+        for job in data["jobs"].values()
+        for step in job["steps"]
+    )
+    for name in re.findall(r"requirements[a-z-]*\.txt", commands):
+        assert (ROOT / name).exists(), name
+
+
+def test_ci_lintian_gate_actually_fails_the_build():
+    steps = _workflow()["jobs"]["package"]["steps"]
+    # The step that *invokes* lintian, not the apt step that installs it.
+    lintian = next(
+        s for s in steps if s.get("run", "").strip().startswith("lintian")
+    )
+    # Without --fail-on, lintian reports tags and still exits 0.
+    assert "--fail-on" in lintian["run"]
 
 
 def test_docs_state_the_real_test_count(request):
@@ -156,3 +189,14 @@ def test_docs_state_the_real_test_count(request):
         assert f"{count} tests" in text, (
             f"{name} does not mention '{count} tests' — update it"
         )
+
+
+def test_requirements_split_keeps_the_optional_extras_separate():
+    core = (ROOT / "requirements-core.txt").read_text()
+    full = (ROOT / "requirements.txt").read_text()
+    assert "-r requirements-core.txt" in full
+    for required in ("PyQt6", "openai"):
+        assert required in core
+    for optional in ("chromadb", "tiktoken", "keyring"):
+        assert optional not in core, f"{optional} is optional, not core"
+        assert optional in full

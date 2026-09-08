@@ -426,7 +426,7 @@ keeps talking to a stale subprocess.
 
 ## 12. Testing
 
-`tests/` holds 245 tests that need no network and no display.
+`tests/` holds 254 tests that need no network and no display.
 
 - **Pure logic** (settings, database, memory, tokens, pricing, utils, theme, chat_io,
   attachments, tools) is tested directly.
@@ -442,9 +442,21 @@ keeps talking to a stale subprocess.
   the fake API.
 - **The packaging is tested too** (`test_packaging.py`): the shell scripts parse and
   fail fast, every Makefile target is declared and `.PHONY`, the desktop entry has
-  exactly one main category, the man page documents every argparse flag, and the
-  version in the man page matches `version.py`. These are the parts that rot quietly
-  because nobody runs them until release day.
+  exactly one main category, the man page documents every argparse flag, the version
+  in the man page matches `version.py`, and the CI workflow parses, gates packaging
+  behind the test jobs, bounds every job in time and passes `--fail-on` to lintian
+  (without it, lintian reports tags and still exits 0). These are the parts that rot
+  quietly because nobody runs them until release day.
+- **Nothing asserts a wire detail the SDK owns.** Request headers are compared through
+  a case-insensitive mapping in `fake_api.Headers`, because HTTP field names are
+  case-insensitive (RFC 9110) and the SDK's casing is not ours to depend on: openai
+  2.x forwards `X-Title` verbatim while 3.x lowercases it, which is exactly the kind
+  of test that fails in CI having proved nothing about PyQOA.
+- **The optional dependencies are tested by their absence too.** `requirements.txt`
+  splits into `requirements-core.txt` plus the three optional packages, and a CI job
+  installs only the core set. Guarded imports are easy to write and easy to break, and
+  the frozen build ships without `chromadb` anyway, so that configuration deserves to
+  be a tested one rather than an assumed one.
 
 `selftest.py` is the runtime counterpart: `pytest` proves the *source* works, and
 `pyqoa --selftest` proves a *build* works. PyInstaller can silently drop a Markdown

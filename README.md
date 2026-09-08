@@ -151,8 +151,13 @@ make run
 To skip every optional dependency, install only the core packages:
 
 ```bash
-pip install "PyQt6>=6.4" "openai>=1.0" "markdown>=3.4" "Pygments>=2.15"
+pip install -r requirements-core.txt      # or: make deps-core
 ```
+
+Each optional package switches a feature off rather than breaking the app:
+without `tiktoken` the token meter estimates instead of counting exactly, without
+`keyring` API keys stay in `settings.json`, and without `chromadb` vector recall is
+unavailable. `pyqoa --selftest` reports which of them are present.
 
 Verify an installation of any kind with:
 
@@ -398,7 +403,7 @@ make check                 # lint, test and self-test
 
 ### Tests
 
-245 tests, needing neither network access nor a display: the API is faked by a local
+254 tests, needing neither network access nor a display: the API is faked by a local
 scripted HTTP server that speaks the real OpenAI wire protocol, MCP by a scripted
 stdio subprocess, and Qt widget tests run headless via `QT_QPA_PLATFORM=offscreen`
 (set by `tests/conftest.py`).
@@ -406,6 +411,7 @@ stdio subprocess, and Qt widget tests run headless via `QT_QPA_PLATFORM=offscree
 | Target | What it does |
 | --- | --- |
 | `make test` | Run the suite (`make test PYTEST_ARGS="-k search"` to narrow it) |
+| `make deps-core` | Install only the required packages, to test the degraded paths |
 | `make test-cov` | Run it with a coverage report |
 | `make lint` | pyflakes over every module |
 | `make selftest` | Exercise the feature surface (Qt, Markdown, PDF, FTS5, tokens) |
@@ -435,9 +441,22 @@ pulls in): bundling it would multiply the download size for an optional feature.
 frozen build reports it as unavailable in `--selftest`, and vector memory switches
 itself off.
 
-[`.github/workflows/ci.yml`](.github/workflows/ci.yml) runs `make check` on Python
-3.10 and 3.12, then builds and lintian-checks the `.deb` and uploads it as an
-artifact.
+### CI
+
+[`.github/workflows/ci.yml`](.github/workflows/ci.yml) has three jobs:
+
+- **Test** — `make check` on Python 3.10 and 3.12 with the full requirements.
+- **Test (core dependencies only)** — the same, with `requirements-core.txt`, which
+  is what exercises the optional-dependency fallbacks (and matches what the `.deb`
+  ships). It fails if `chromadb`, `tiktoken` or `keyring` turn out to be installed
+  after all, so the job cannot quietly stop testing what it is for.
+- **Build .deb** — only after both test jobs pass: builds the package, runs the
+  frozen bundle's `--selftest`, gates on `lintian --fail-on error,warning`, and
+  uploads the `.deb` as an artifact.
+
+Because `requirements.txt` gives no upper bounds, CI always resolves the newest
+`openai` release; that is deliberate — it is how a breaking SDK change gets noticed
+here rather than in a user's install. Pin a ceiling if you would rather not be told.
 
 There is no pip-installable wheel: the modules sit at the top level of the
 repository, and names like `utils`, `tools` and `settings` would collide with other

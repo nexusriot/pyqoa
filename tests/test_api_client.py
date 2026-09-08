@@ -9,7 +9,7 @@ import api_client
 from api_client import (
     StreamWorker, TitleWorker, _merge_tool_call_deltas, _tool_calls_payload,
     build_client, clean_title, fallback_title, friendly_error, is_local_url,
-    is_reasoning_model, preflight,
+    is_reasoning_model, preflight, request_headers,
 )
 from fake_api import FakeAPI
 from settings import Settings
@@ -138,6 +138,27 @@ def test_build_client_sends_custom_headers(cfg):
     client = build_client(cfg)
     assert client.default_headers["X-Title"] == "PyQOA"
     assert "User-Agent" in client.default_headers
+
+
+def test_our_user_agent_is_the_default(cfg):
+    assert request_headers(cfg)["User-Agent"].startswith("PyQOA/")
+
+
+def test_a_user_supplied_user_agent_is_not_duplicated(cfg):
+    # Any casing must count as an override — HTTP field names are case-insensitive.
+    for name in ("user-agent", "User-Agent", "USER-AGENT"):
+        cfg.set("request_headers", {name: "Mine/1.0"})
+        headers = request_headers(cfg)
+        assert [v for k, v in headers.items() if k.lower() == "user-agent"] == [
+            "Mine/1.0"
+        ], name
+
+
+def test_blank_header_names_are_dropped(cfg):
+    cfg.set("request_headers", {"  ": "x", "X-Ok": 1})
+    headers = request_headers(cfg)
+    assert headers["X-Ok"] == "1"
+    assert all(name.strip() for name in headers)
 
 
 def test_build_client_ignores_malformed_headers(cfg):

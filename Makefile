@@ -25,7 +25,8 @@ TARBALL := dist/pyqoa-$(VERSION)-linux-$(shell uname -m).tar.gz
 export QT_QPA_PLATFORM ?= offscreen
 
 .DEFAULT_GOAL := help
-.PHONY: help version venv deps deps-dev deps-build run test test-cov lint \
+.PHONY: help version venv deps deps-core deps-dev deps-build run test \
+        test-cov lint \
         selftest check binary onefile verify-binary tarball deb deb-lint \
         sdist install uninstall clean distclean
 
@@ -46,8 +47,11 @@ venv: ## Create the project virtualenv
 	$(PYTHON) -m venv $(VENV)
 	$(VENV)/bin/pip install --upgrade pip
 
-deps: ## Install runtime dependencies
+deps: ## Install runtime dependencies, optional features included
 	$(PY) -m pip install -r requirements.txt
+
+deps-core: ## Install only the dependencies PyQOA needs to run
+	$(PY) -m pip install -r requirements-core.txt
 
 deps-dev: ## Install test dependencies
 	$(PY) -m pip install -r requirements-dev.txt

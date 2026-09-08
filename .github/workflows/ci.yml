@@ -6,10 +6,24 @@ on:
   pull_request:
   workflow_dispatch:
 
+# A newer push supersedes an in-flight run on the same ref.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  # PyQt6 wheels bundle Qt but still link these from the system, even for the
+  # offscreen platform plugin the tests use.
+  QT_APT_PACKAGES: >-
+    libegl1 libgl1 libdbus-1-3 libxkbcommon-x11-0 libxcb-cursor0
+    libxcb-icccm4 libxcb-image0 libxcb-keysyms1 libxcb-randr0
+    libxcb-render-util0 libxcb-shape0 libxcb-xinerama0
+
 jobs:
   test:
     name: Test (Python ${{ matrix.python }})
     runs-on: ubuntu-latest
+    timeout-minutes: 20
     strategy:
       fail-fast: false
       matrix:
@@ -22,28 +36,29 @@ jobs:
           python-version: ${{ matrix.python }}
           cache: pip
 
-      # PyQt6 wheels bundle Qt but still link these from the system, even for
-      # the offscreen platform plugin the tests use.
       - name: Install Qt runtime libraries
         run: |
           sudo apt-get update
-          sudo apt-get install -y --no-install-recommends \
-            libegl1 libgl1 libdbus-1-3 libxkbcommon-x11-0 libxcb-cursor0 \
-            libxcb-icccm4 libxcb-image0 libxcb-keysyms1 libxcb-randr0 \
-            libxcb-render-util0 libxcb-shape0 libxcb-xinerama0
+          sudo apt-get install -y --no-install-recommends $QT_APT_PACKAGES
 
       - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
           pip install -r requirements.txt -r requirements-dev.txt
 
+      - name: Record the versions under test
+        run: pip list
+
       - name: Lint, test and self-test
         run: make check PYTHON=python
 
-  package:
-    name: Build .deb
+  test-minimal:
+    # The app guards every optional dependency (chromadb, tiktoken, keyring) and
+    # is meant to degrade rather than fail. Installing only the core packages is
+    # what actually proves those branches, and it is how the .deb ships.
+    name: Test (core dependencies only)
     runs-on: ubuntu-latest
-    needs: test
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@v4
 
@@ -55,10 +70,46 @@ jobs:
       - name: Install Qt runtime libraries
         run: |
           sudo apt-get update
-          sudo apt-get install -y --no-install-recommends \
-            libegl1 libgl1 libdbus-1-3 libxkbcommon-x11-0 libxcb-cursor0 \
-            libxcb-icccm4 libxcb-image0 libxcb-keysyms1 libxcb-randr0 \
-            libxcb-render-util0 libxcb-shape0 libxcb-xinerama0 lintian
+          sudo apt-get install -y --no-install-recommends $QT_APT_PACKAGES
+
+      - name: Install core dependencies only
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements-core.txt -r requirements-dev.txt
+
+      - name: Confirm the optional packages really are absent
+        run: |
+          python - <<'PY'
+          import importlib.util, sys
+          present = [
+              name for name in ("chromadb", "tiktoken", "keyring")
+              if importlib.util.find_spec(name) is not None
+          ]
+          if present:
+              sys.exit(f"expected these to be absent: {present}")
+          print("chromadb, tiktoken and keyring are absent, as intended")
+          PY
+
+      - name: Lint, test and self-test
+        run: make check PYTHON=python
+
+  package:
+    name: Build .deb
+    runs-on: ubuntu-latest
+    needs: [test, test-minimal]
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: Install Qt runtime libraries and lintian
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends $QT_APT_PACKAGES lintian
 
       - name: Install dependencies
         run: |
@@ -72,7 +123,12 @@ jobs:
         run: make verify-binary
 
       - name: Check the package with lintian
-        run: lintian --tag-display-limit 0 dist/*.deb
+        run: lintian --fail-on error,warning --tag-display-limit 0 dist/*.deb
+
+      - name: Describe the artefacts
+        run: |
+          ls -lh dist
+          dpkg-deb --info dist/*.deb
 
       - uses: actions/upload-artifact@v4
         with:
