@@ -403,7 +403,7 @@ make check                 # lint, test and self-test
 
 ### Tests
 
-254 tests, needing neither network access nor a display: the API is faked by a local
+257 tests, needing neither network access nor a display: the API is faked by a local
 scripted HTTP server that speaks the real OpenAI wire protocol, MCP by a scripted
 stdio subprocess, and Qt widget tests run headless via `QT_QPA_PLATFORM=offscreen`
 (set by `tests/conftest.py`).

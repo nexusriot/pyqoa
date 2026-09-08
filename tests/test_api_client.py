@@ -1,4 +1,7 @@
-import httpx
+import importlib
+from pathlib import Path
+
+import openai
 import pytest
 from openai import (
     APITimeoutError, AuthenticationError, NotFoundError,
@@ -15,6 +18,8 @@ from fake_api import FakeAPI
 from settings import Settings
 from tools import ToolRegistry
 
+ROOT = Path(__file__).resolve().parent.parent
+
 
 @pytest.fixture
 def cfg(data_dir) -> Settings:
@@ -25,10 +30,22 @@ def cfg(data_dir) -> Settings:
     return s
 
 
+def _sdk_http():
+    """The httpx flavour the installed SDK is built on.
+
+    openai 2.x is built on httpx and 3.x on httpx2, and its exception types want
+    a response object of the matching flavour. `DefaultHttpxClient` subclasses
+    the SDK's own client, so its base class names the right module.
+    """
+    base = openai.DefaultHttpxClient.__mro__[1]
+    return importlib.import_module(base.__module__.split(".")[0])
+
+
 def _http_error(cls, status: int):
     """Build an SDK status error without a live request."""
-    request = httpx.Request("POST", "http://x/v1/chat/completions")
-    response = httpx.Response(status, request=request, json={"error": {}})
+    http = _sdk_http()
+    request = http.Request("POST", "http://x/v1/chat/completions")
+    response = http.Response(status, request=request, json={"error": {}})
     return cls("boom", response=response, body=None)
 
 
@@ -164,6 +181,35 @@ def test_blank_header_names_are_dropped(cfg):
 def test_build_client_ignores_malformed_headers(cfg):
     cfg.set("request_headers", "oops")
     assert build_client(cfg) is not None
+
+
+def test_build_client_needs_no_httpx_of_its_own():
+    # openai 2.x depends on httpx and 3.x on httpx2; importing either directly
+    # would make PyQOA depend on a package the installed SDK may not pull in.
+    source = (ROOT / "api_client.py").read_text()
+    for line in source.splitlines():
+        stripped = line.strip()
+        assert not stripped.startswith(("import httpx", "from httpx")), line
+
+
+def test_proxy_is_actually_used(qtbot, cfg):
+    """A configured proxy must carry the request, not merely be accepted."""
+    with FakeAPI([{"type": "stream", "chunks": ["through the proxy"]}]) as proxy:
+        # An address nothing listens on: the reply can only arrive via the proxy.
+        cfg.set("api_url", "http://127.0.0.1:9/v1")
+        cfg.set("proxy", proxy.base_url.removesuffix("/v1"))
+        worker = StreamWorker(cfg, messages=[{"role": "user", "content": "hi"}])
+        assert _run(qtbot, worker) == "through the proxy"
+        # Absolute-form request line — the signature of a proxied HTTP request.
+        assert proxy.requests[0]["path"].startswith("http://127.0.0.1:9/v1")
+
+
+def test_requests_are_not_proxied_by_default(qtbot, cfg):
+    with FakeAPI([{"type": "stream", "chunks": ["direct"]}]) as api:
+        cfg.set("api_url", api.base_url)
+        worker = StreamWorker(cfg, messages=[{"role": "user", "content": "hi"}])
+        assert _run(qtbot, worker) == "direct"
+        assert api.requests[0]["path"] == "/v1/chat/completions"
 
 
 def _run(qtbot, worker, timeout=15000):

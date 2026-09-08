@@ -9,7 +9,6 @@ import re
 import time
 from urllib.parse import urlparse
 
-import httpx
 from PyQt6.QtCore import QThread, pyqtSignal
 from openai import (
     APIConnectionError,
@@ -17,6 +16,7 @@ from openai import (
     APITimeoutError,
     AuthenticationError,
     BadRequestError,
+    DefaultHttpxClient,
     NotFoundError,
     OpenAI,
     RateLimitError,
@@ -133,6 +133,11 @@ def build_client(settings, overrides: dict | None = None) -> OpenAI:
 
     Retries are handled by `StreamWorker` (so they can be cancelled and shown in
     the UI), hence `max_retries=0` on the SDK client itself.
+
+    The proxy client comes from `openai.DefaultHttpxClient` rather than from an
+    `httpx` import of our own: openai 2.x is built on httpx and 3.x on httpx2, so
+    importing either directly makes PyQOA depend on a package the installed SDK
+    may not pull in.
     """
     overrides = overrides or {}
     timeout = float(overrides.get("timeout") or settings.get("timeout", 60))
@@ -141,7 +146,7 @@ def build_client(settings, overrides: dict | None = None) -> OpenAI:
     proxy = (settings.get("proxy") or "").strip()
     http_client = None
     if proxy:
-        http_client = httpx.Client(proxy=proxy, timeout=timeout)
+        http_client = DefaultHttpxClient(proxy=proxy, timeout=timeout)
 
     kwargs: dict = {
         "api_key": settings.get("api_key") or "none",

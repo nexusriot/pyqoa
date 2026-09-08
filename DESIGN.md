@@ -366,7 +366,13 @@ store and blanks it in the JSON payload; `_restore_secrets` reads them back on l
 so a headless Linux box silently keeps using plaintext rather than losing the key.
 
 **Transport.** `build_client` attaches `default_headers` (always including a versioned
-User-Agent) and, when a proxy is configured, a dedicated `httpx.Client`. It sets the
+User-Agent, applied case-insensitively so a user-configured `user-agent` replaces it
+rather than joining it) and, when a proxy is configured, a dedicated
+`openai.DefaultHttpxClient`. That class rather than an `httpx.Client` of our own is
+deliberate: openai 2.x is built on `httpx` and 3.x on `httpx2`, so importing either
+directly makes PyQOA depend on a package the installed SDK may not pull in — which is
+exactly how CI broke once (§12). `DefaultHttpxClient` subclasses whichever the SDK
+uses. It sets the
 SDK's own `max_retries=0` on purpose: retries belong to `StreamWorker`, where they can
 be cancelled, backed off with the user's own delay, and surfaced through the `retrying`
 signal. `_is_retryable` retries connection errors, timeouts, 429 and 5xx; it does not
@@ -426,7 +432,7 @@ keeps talking to a stale subprocess.
 
 ## 12. Testing
 
-`tests/` holds 254 tests that need no network and no display.
+`tests/` holds 257 tests that need no network and no display.
 
 - **Pure logic** (settings, database, memory, tokens, pricing, utils, theme, chat_io,
   attachments, tools) is tested directly.
@@ -451,7 +457,15 @@ keeps talking to a stale subprocess.
   a case-insensitive mapping in `fake_api.Headers`, because HTTP field names are
   case-insensitive (RFC 9110) and the SDK's casing is not ours to depend on: openai
   2.x forwards `X-Title` verbatim while 3.x lowercases it, which is exactly the kind
-  of test that fails in CI having proved nothing about PyQOA.
+  of test that fails in CI having proved nothing about PyQOA. For the same reason
+  `_sdk_http()` asks the SDK which httpx flavour it is built on instead of importing
+  one, since its exception types want a matching response object.
+- **Unpinned dependencies are checked by CI, not by hope.** `requirements.txt` has no
+  upper bounds, so CI resolves the newest `openai` every run. That has already caught
+  two breaking changes across a major bump: the header casing above, and openai 3.x
+  moving from `httpx` to `httpx2`, which exposed `api_client` importing `httpx` as an
+  undeclared dependency it had only ever received transitively. A test now asserts
+  that no module imports `httpx` directly.
 - **The optional dependencies are tested by their absence too.** `requirements.txt`
   splits into `requirements-core.txt` plus the three optional packages, and a CI job
   installs only the core set. Guarded imports are easy to write and easy to break, and

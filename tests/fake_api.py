@@ -94,9 +94,14 @@ class FakeAPI:
             def do_POST(self):
                 length = int(self.headers.get("Content-Length", 0))
                 body = json.loads(self.rfile.read(length) or b"{}")
-                api.requests.append(
-                    {"body": body, "headers": Headers(self.headers.items())}
-                )
+                # `path` is origin-form ("/v1/…") normally and absolute-form
+                # ("http://host/v1/…") when the client is talking through a
+                # proxy, which is how a test can tell the two apart.
+                api.requests.append({
+                    "body": body,
+                    "headers": Headers(self.headers.items()),
+                    "path": self.path,
+                })
                 step = api._next()
 
                 if step["type"] == "status":
